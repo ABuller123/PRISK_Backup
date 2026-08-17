@@ -48,7 +48,7 @@ mod_hazards_events_ui <- function(id, title = "Hazard events") {
 #' @param spatial_data_reactive optional reactive returning preloaded spatial separation data
 #' @param region_reactive optional reactive returning "brazil" (default) or "global"; when "global",
 #'   the per-event Spatial Separation panel is hidden (no sub-region breakdown in Global mode)
-#' @return reactive data.frame of configured events with columns: event_id, hazard_type, hazard_indicator, hazard_name, scenario_name, return_period, event_year, season
+#' @return reactive data.frame of configured events with columns: event_id, hazard_type, hazard_indicator, hazard_name, scenario_name, return_period, event_year, season, calc_mode
 #' @export
 mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, base_dir_reactive = NULL, spatial_data_reactive = NULL, region_reactive = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
@@ -65,11 +65,34 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
       spatial_level = character(),
       spatial_region_codes = character(),
       spatial_region_labels = character(),
-      spatial_scheme = character()
+      spatial_scheme = character(),
+      # "deterministic" (default, single event-year shock) or "probabilistic"
+      # (Average Annual Loss across every available return period, deducted
+      # from every year of the pathway). See calculate_aal() / Phase 3.
+      calc_mode = character()
     ))
 
     # Counter for dynamic UIs
     counter <- shiny::reactiveVal(1L)
+
+    # Hazard types with a working Probabilistic/AAL calculation engine (v1: Flood only).
+    # The Mode toggle is shown for every hazard, but Probabilistic is only actually
+    # honored for these -- picking it for anything else is rejected at Add time with
+    # a clear message, so the dropdown itself never needs hazard-type-dependent filtering.
+    probabilistic_capable_hazards <- c("Flood")
+
+    # Shared event_id assignment, used by both the deterministic and probabilistic
+    # add_event branches so the two paths never diverge on this bookkeeping detail.
+    next_event_id <- function(cur_events) {
+      if (nrow(cur_events) > 0 && "event_id" %in% names(cur_events)) {
+        existing_ids <- cur_events$event_id
+        numeric_ids <- as.integer(gsub("^ev", "", existing_ids))
+        numeric_ids <- numeric_ids[!is.na(numeric_ids)]
+        if (length(numeric_ids) > 0) max(numeric_ids) + 1L else 1L
+      } else {
+        1L
+      }
+    }
 
     spatial_data <- shiny::reactive({
       if (!is.null(spatial_data_reactive)) {
@@ -111,11 +134,82 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
       haz_type <- input[[paste0("hazard_type_", k)]]
       if (is.null(haz_type)) return()
 
-      # Get index configuration for this hazard type
+      calc_mode_val <- input[[paste0("calc_mode_", k)]]
+      if (is.null(calc_mode_val) || !nzchar(as.character(calc_mode_val))) {
+        calc_mode_val <- "deterministic"
+      }
+      calc_mode_val <- as.character(calc_mode_val)
+
       cfg <- try(hazard_configs(), silent = TRUE)
+      if (inherits(cfg, "try-error")) cfg <- NULL
+
+      # ------------------------------------------------------------------
+      # PROBABILISTIC (AAL) BRANCH -- kept fully separate from the
+      # deterministic branch below so toggling modes can never corrupt the
+      # deterministic single-event-year logic. Only requires scenario_name
+      # (every available return period is pulled in at calculation time,
+      # inside the new AAL engine -- not here).
+      # ------------------------------------------------------------------
+      if (identical(calc_mode_val, "probabilistic")) {
+        if (!haz_type %in% probabilistic_capable_hazards) {
+          message(
+            "[mod_hazards_events] Probabilistic mode is not yet supported for hazard type: ",
+            haz_type, ". Supported: ", paste(probabilistic_capable_hazards, collapse = ", ")
+          )
+          counter(k + 1L)
+          return()
+        }
+
+        scenario_val <- input[[paste0("filter_", k, "_scenario_name")]]
+        if (is.null(scenario_val) || !nzchar(as.character(scenario_val))) {
+          counter(k + 1L)
+          return()
+        }
+
+        hazard_indicator_val <- get_index_indicator(cfg, haz_type)
+        if (is.na(hazard_indicator_val)) {
+          counter(k + 1L)
+          return()
+        }
+
+        cur_events <- events_rv()
+        next_id <- next_event_id(cur_events)
+
+        new_row <- tibble::tibble(
+          event_id = paste0("ev", next_id),
+          hazard_type = haz_type,
+          hazard_indicator = hazard_indicator_val,
+          # No single hazard_name exists for an "all return periods" event --
+          # this is a descriptive label only, never used to look up one raster.
+          hazard_name = paste0(haz_type, "__AAL__scenario_name=", as.character(scenario_val)),
+          scenario_name = as.character(scenario_val),
+          return_period = NA_real_,
+          event_year = NA_integer_,
+          season = NA_character_,
+          # Spatial separation is not implemented for Probabilistic/AAL in v1
+          # (see plan); "brazil" is the existing "whole area, no sub-region
+          # filter" sentinel, so this is a genuine no-op regardless of region.
+          spatial_level = "brazil",
+          spatial_region_codes = NA_character_,
+          spatial_region_labels = NA_character_,
+          spatial_scheme = NA_character_,
+          calc_mode = "probabilistic"
+        )
+
+        events_rv(dplyr::bind_rows(cur_events, new_row))
+        counter(k + 1L)
+        return()
+      }
+
+      # ------------------------------------------------------------------
+      # DETERMINISTIC BRANCH -- unchanged from the existing single-event
+      # behavior; only the final calc_mode tag (below) is new.
+      # ------------------------------------------------------------------
+
+      # Get index configuration for this hazard type
       index_ind <- get_index_indicator(cfg, haz_type)
       index_cols <- cfg[[haz_type]]$indicators[[index_ind]]$index
-      
+
       # Collect all index values from dynamic inputs
       index_values <- list()
       for (idx_col in index_cols) {
@@ -155,20 +249,8 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
       # Prepare new row - start with basic columns
       # Generate unique event_id based on existing events to avoid duplicates
       cur_events <- events_rv()
-      next_id <- if (nrow(cur_events) > 0 && "event_id" %in% names(cur_events)) {
-        existing_ids <- cur_events$event_id
-        # Extract numeric part from existing IDs (e.g., "ev1" -> 1)
-        numeric_ids <- as.integer(gsub("^ev", "", existing_ids))
-        numeric_ids <- numeric_ids[!is.na(numeric_ids)]
-        if (length(numeric_ids) > 0) {
-          max(numeric_ids) + 1L
-        } else {
-          1L
-        }
-      } else {
-        1L
-      }
-      
+      next_id <- next_event_id(cur_events)
+
       new_row <- tibble::tibble(
         event_id = paste0("ev", next_id),
         hazard_type = haz_type,
@@ -230,6 +312,7 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
       new_row$spatial_region_codes <- if (length(selected_region_codes) > 0) paste(unique(selected_region_codes), collapse = "|") else NA_character_
       new_row$spatial_region_labels <- if (length(selected_region_labels) > 0) paste(unique(selected_region_labels), collapse = "|") else NA_character_
       new_row$spatial_scheme <- spatial_scheme_val
+      new_row$calc_mode <- "deterministic"
 
       # bind_rows handles different column sets gracefully
       events_rv(dplyr::bind_rows(cur_events, new_row))
@@ -266,22 +349,20 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
       # Only show form for current event (index k) - NO hazard_indicator dropdown
       shiny::wellPanel(
         style = "padding-bottom: 0;",
+        shiny::radioButtons(
+          ns(paste0("calc_mode_", k)),
+          label = "Mode",
+          choices = c("Deterministic" = "deterministic", "Probabilistic" = "probabilistic"),
+          selected = "deterministic",
+          inline = TRUE
+        ),
         shiny::selectInput(ns(paste0("hazard_type_", k)), "Hazard Type",
           choices = hazard_type_choices,
           selected = if (length(hazard_type_choices) > 0) hazard_type_choices[[1]] else NULL
         ),
         shiny::uiOutput(ns(paste0("dynamic_filters_ui_", k))),
         shiny::uiOutput(ns(paste0("spatial_ui_", k))),
-        shiny::sliderInput(
-          ns(paste0("year_", k)),
-          label = "Shock Year:",
-          value = 2030,
-          min = 2025,
-          max = 2049,
-          step = 1,
-          sep = "",
-          ticks = TRUE
-        ),
+        shiny::uiOutput(ns(paste0("year_ui_", k))),
         shiny::div(
           style = "margin: 20px -15px -10px -15px;",
           shiny::actionButton(
@@ -311,7 +392,14 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
         cfg <- try(hazard_configs(), silent = TRUE)
         index_ind <- get_index_indicator(cfg, hazard_type_val)
         index_cols <- cfg[[hazard_type_val]]$indicators[[index_ind]]$index
-        
+
+        # Probabilistic mode uses every available return period at once (see the
+        # AAL engine), so the return_period filter is not shown -- only scenario.
+        calc_mode_val <- input[[paste0("calc_mode_", k)]]
+        if (identical(calc_mode_val, "probabilistic")) {
+          index_cols <- setdiff(index_cols, "return_period")
+        }
+
         if (length(index_cols) == 0) return(shiny::helpText("No index defined for this hazard"))
 
         # Create a list of selectInputs, one for each index column
@@ -372,6 +460,15 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
           ))
         }
 
+        calc_mode_val <- input[[paste0("calc_mode_", k)]]
+        if (identical(calc_mode_val, "probabilistic")) {
+          return(shiny::p(
+            class = "text-muted",
+            style = "margin-top: 8px; font-size: 0.85em;",
+            "Spatial separation is not available in Probabilistic mode — the Average Annual Loss covers the whole selected area."
+          ))
+        }
+
         cfg <- try(hazard_configs(), silent = TRUE)
         if (inherits(cfg, "try-error") || is.null(cfg) || !hazard_type_val %in% names(cfg)) {
           return(shiny::span(""))
@@ -420,6 +517,28 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
           region_input
         )
       })
+
+      output[[paste0("year_ui_", k)]] <- shiny::renderUI({
+        calc_mode_val <- input[[paste0("calc_mode_", k)]]
+        if (identical(calc_mode_val, "probabilistic")) {
+          return(shiny::p(
+            class = "text-muted",
+            style = "margin-top: 8px; font-size: 0.85em;",
+            "Shock year is not applicable in Probabilistic mode — the Average Annual Loss is deducted from every year of the projection."
+          ))
+        }
+
+        shiny::sliderInput(
+          ns(paste0("year_", k)),
+          label = "Shock Year:",
+          value = 2030,
+          min = 2025,
+          max = 2049,
+          step = 1,
+          sep = "",
+          ticks = TRUE
+        )
+      })
     })
 
 
@@ -439,6 +558,9 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
         }
 
         # Persist only index-defining columns; hazard metadata is derived on load.
+        # NOTE: calc_mode is exported for reference, but Load Events does not yet
+        # reconstruct probabilistic (AAL) rows from an uploaded file -- only
+        # deterministic rows round-trip through Save/Load in this version.
         export_cols <- c(
           "event_id",
           "hazard_type",
@@ -449,7 +571,8 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
           "spatial_level",
           "spatial_region_codes",
           "spatial_region_labels",
-          "spatial_scheme"
+          "spatial_scheme",
+          "calc_mode"
         )
 
         export_df <- current_events |>

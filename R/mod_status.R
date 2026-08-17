@@ -713,6 +713,7 @@ mod_status_server <- function(id, status_reactive, events_reactive, delete_event
       if (!"spatial_level" %in% names(events)) events$spatial_level <- NA_character_
       if (!"spatial_region_codes" %in% names(events)) events$spatial_region_codes <- NA_character_
       if (!"spatial_region_labels" %in% names(events)) events$spatial_region_labels <- NA_character_
+      if (!"calc_mode" %in% names(events)) events$calc_mode <- NA_character_
 
       whole_area_label <- if (identical(region(), "global")) "Global (whole)" else "Brazil (whole)"
 
@@ -726,16 +727,37 @@ mod_status_server <- function(id, status_reactive, events_reactive, delete_event
             MoreArgs = list(whole_area_label = whole_area_label),
             SIMPLIFY = TRUE,
             USE.NAMES = FALSE
+          ),
+          # Older saved events / rows loaded before this feature existed have no
+          # calc_mode -- treat as deterministic, matching add_event()'s default.
+          calc_mode = dplyr::coalesce(.data$calc_mode, "deterministic"),
+          mode_label = dplyr::if_else(.data$calc_mode == "probabilistic", "Probabilistic", "Deterministic"),
+          # Probabilistic events use every available return period (see
+          # calculate_aal()) and deduct the AAL from every year of the pathway,
+          # so there's no single return_period/event_year to show.
+          return_period_display = dplyr::if_else(
+            .data$calc_mode == "probabilistic",
+            "All RPs (AAL)",
+            as.character(.data$return_period)
+          ),
+          event_year_display = dplyr::if_else(
+            .data$calc_mode == "probabilistic",
+            "N/A (all years)",
+            as.character(.data$event_year)
           )
         ) |>
-        dplyr::select("event_id", "hazard_type", "hazard_name", "scenario_name", "return_period", "event_year", "spatial_selection") |>
+        dplyr::select(
+          "event_id", "hazard_type", "hazard_name", "mode_label", "scenario_name",
+          "return_period_display", "event_year_display", "spatial_selection"
+        ) |>
         dplyr::rename(
           "Event ID" = "event_id",
           "Hazard Type" = "hazard_type",
           "Hazard Name" = "hazard_name",
+          "Mode" = "mode_label",
           "Scenario" = "scenario_name",
-          "Return Period (years)" = "return_period",
-          "Shock Year" = "event_year",
+          "Return Period (years)" = "return_period_display",
+          "Shock Year" = "event_year_display",
           "Spatial Separation" = "spatial_selection"
         )
 

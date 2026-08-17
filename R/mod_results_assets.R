@@ -353,6 +353,73 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
       assets_df
     }
 
+    # Probabilistic-mode Asset Exposures table: unlike deterministic assets_factors
+    # (one row per asset per single event), probabilistic assets_factors has one row
+    # per asset PER RETURN PERIOD, with no per-row match to the UI's single event_id.
+    # This pivots the per-return-period diagnostics (flood depth, damage factor,
+    # business disruption) wide -- one column set per RP -- and joins in the
+    # integrated per-asset AAL (physical damage, business interruption) from
+    # results$aal_channels$summary, giving one row per asset.
+    build_probabilistic_assets_table <- function(assets_factors_by_rp, aal_summary) {
+      if (is.null(assets_factors_by_rp) || nrow(assets_factors_by_rp) == 0) {
+        return(tibble::tibble())
+      }
+
+      depth_col <- if ("flood_depth_cm_raw" %in% names(assets_factors_by_rp)) {
+        "flood_depth_cm_raw"
+      } else if ("flood_depth_cm" %in% names(assets_factors_by_rp)) {
+        "flood_depth_cm"
+      } else {
+        NA_character_
+      }
+
+      base_cols <- intersect(
+        c("asset", "company", "asset_category", "share_of_economic_activity"),
+        names(assets_factors_by_rp)
+      )
+      asset_meta <- assets_factors_by_rp |>
+        dplyr::select(dplyr::all_of(base_cols)) |>
+        dplyr::distinct(.data$asset, .keep_all = TRUE)
+
+      metric_cols <- intersect(
+        c(depth_col, "damage_factor", "business_disruption"),
+        names(assets_factors_by_rp)
+      )
+      metric_cols <- metric_cols[!is.na(metric_cols)]
+
+      metric_labels <- c(
+        flood_depth_cm_raw = "Flood Depth (cm)",
+        flood_depth_cm = "Flood Depth (cm)",
+        damage_factor = "Damage Factor",
+        business_disruption = "Business Disruption (days)"
+      )
+
+      result <- asset_meta
+
+      if (length(metric_cols) > 0 && "return_period" %in% names(assets_factors_by_rp)) {
+        for (col in metric_cols) {
+          wide_piece <- assets_factors_by_rp |>
+            dplyr::select("asset", "return_period", value = dplyr::all_of(col)) |>
+            dplyr::mutate(rp_col = paste0(metric_labels[[col]], " (RP=", .data$return_period, ")")) |>
+            dplyr::select(-"return_period") |>
+            tidyr::pivot_wider(names_from = "rp_col", values_from = "value")
+          result <- result |> dplyr::left_join(wide_piece, by = "asset")
+        }
+      }
+
+      if (!is.null(aal_summary) && is.data.frame(aal_summary) && nrow(aal_summary) > 0) {
+        aal_display <- aal_summary |>
+          dplyr::rename(
+            "AAL Physical Damage - Profit ($)" = "aal_pd_profit",
+            "AAL Physical Damage - Revenue Rate" = "aal_pd_revenue_rate",
+            "AAL Business Disruption - Revenue Rate" = "aal_bd_revenue_rate"
+          )
+        result <- result |> dplyr::left_join(aal_display, by = "asset")
+      }
+
+      result
+    }
+
     drop_empty_columns <- function(df) {
       if (is.null(df) || nrow(df) == 0 || ncol(df) == 0) {
         return(df)
@@ -402,7 +469,8 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
         "event_year",
         "spatial_level",
         "spatial_region_codes",
-        "spatial_region_labels"
+        "spatial_region_labels",
+        "calc_mode"
       )
 
       out <- events_df
@@ -417,7 +485,8 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
         dplyr::mutate(
           event_id = as.character(.data$event_id),
           return_period = suppressWarnings(as.numeric(.data$return_period)),
-          event_year = suppressWarnings(as.integer(.data$event_year))
+          event_year = suppressWarnings(as.integer(.data$event_year)),
+          calc_mode = dplyr::coalesce(as.character(.data$calc_mode), "deterministic")
         ) |>
         dplyr::filter(!is.na(.data$event_id) & nzchar(.data$event_id)) |>
         dplyr::distinct(.data$event_id, .keep_all = TRUE)
@@ -564,8 +633,12 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
     }
 
     build_event_metadata_ui <- function(event_row) {
+      calc_mode_val <- if ("calc_mode" %in% names(event_row)) event_row$calc_mode[[1]] else "deterministic"
+      mode_label <- if (identical(calc_mode_val, "probabilistic")) "Probabilistic (AAL)" else "Deterministic"
+
       metadata_items <- list(
         list(label = "Event ID", value = event_row$event_id),
+        list(label = "Mode", value = mode_label),
         list(label = "Hazard Type", value = event_row$hazard_type),
         list(label = "Hazard Name", value = event_row$hazard_name),
         list(label = "Scenario", value = event_row$scenario_name),
@@ -706,6 +779,32 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
         event_id_val <- event_row$event_id[[1]]
 
         output[[paste0("assets_table_", idx)]] <- DT::renderDataTable({
+          calc_mode_val <- if ("calc_mode" %in% names(event_row)) event_row$calc_mode[[1]] else "deterministic"
+
+          if (identical(calc_mode_val, "probabilistic")) {
+            # Probabilistic assets_factors has one row per asset PER RETURN
+            # PERIOD (not one row per event_id), so it isn't filtered by
+            # event_id_val at all -- every row already belongs to this one
+            # scenario/hazard_type by construction (see compute_risk_probabilistic()).
+            probabilistic_table <- build_probabilistic_assets_table(assets, results$aal_channels$summary)
+            session$userData$hazard_tables_data[[idx]] <- probabilistic_table
+            session$userData$hazard_tables_display_data[[idx]] <- probabilistic_table
+
+            if (is.null(probabilistic_table) || nrow(probabilistic_table) == 0) {
+              return(DT::datatable(
+                tibble::tibble(Message = "No assets available for this event."),
+                options = list(dom = "t"),
+                rownames = FALSE
+              ))
+            }
+
+            return(DT::datatable(
+              probabilistic_table,
+              options = list(pageLength = 25, scrollX = TRUE),
+              rownames = FALSE
+            ))
+          }
+
           current_assets <- assets
 
           if ("event_id" %in% names(current_assets) && !is.na(event_id_val) && nzchar(as.character(event_id_val))) {
