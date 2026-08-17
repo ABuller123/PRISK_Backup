@@ -1,3 +1,16 @@
+#' Resolve the hazards config directory for a given region
+#'
+#' @description Brazil (the default region) uses the full `hazards/config` folder
+#'   (all hazard types). Global mode uses `hazards/config_global`, a sibling folder
+#'   containing only the flood-hazard config pointed at global flood rasters.
+#' @param base_dir Character, the data root directory
+#' @param region Character, "brazil" or "global" (default "brazil")
+#' @return Character path to the region's hazards config directory
+#' @noRd
+resolve_hazards_dir <- function(base_dir, region = "brazil") {
+  file.path(base_dir, "hazards", if (identical(region, "global")) "config_global" else "config")
+}
+
 #' Deep-merge list overrides (internal)
 #'
 #' @param base Base list

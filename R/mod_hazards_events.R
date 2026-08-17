@@ -46,9 +46,11 @@ mod_hazards_events_ui <- function(id, title = "Hazard events") {
 #' @param hazard_configs reactive list from load_hazards_and_inventory()$configs
 #' @param base_dir_reactive optional reactive returning base_dir for loading spatial separation options
 #' @param spatial_data_reactive optional reactive returning preloaded spatial separation data
+#' @param region_reactive optional reactive returning "brazil" (default) or "global"; when "global",
+#'   the per-event Spatial Separation panel is hidden (no sub-region breakdown in Global mode)
 #' @return reactive data.frame of configured events with columns: event_id, hazard_type, hazard_indicator, hazard_name, scenario_name, return_period, event_year, season
 #' @export
-mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, base_dir_reactive = NULL, spatial_data_reactive = NULL) {
+mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, base_dir_reactive = NULL, spatial_data_reactive = NULL, region_reactive = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
       events_rv <- shiny::reactiveVal(tibble::tibble(
@@ -359,6 +361,15 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
         hazard_type_val <- input[[paste0("hazard_type_", k)]]
         if (is.null(hazard_type_val) || !nzchar(as.character(hazard_type_val))) {
           return(shiny::span(""))
+        }
+
+        region_val <- if (!is.null(region_reactive)) region_reactive() else "brazil"
+        if (identical(region_val, "global")) {
+          return(shiny::p(
+            class = "text-muted",
+            style = "margin-top: 8px; font-size: 0.85em;",
+            "Spatial separation is not available in Global mode — analysis covers the whole selected area."
+          ))
         }
 
         cfg <- try(hazard_configs(), silent = TRUE)

@@ -18,10 +18,20 @@ app_ui <- function(request) {
         div(
           class = "app-header-text",
           h1("Physical Risk Analysis Tool", class = "app-title"),
-          p("Physical risk assessment for financial portfolios in Brazil", class = "app-subtitle")
+          p("Physical risk assessment for financial portfolios", class = "app-subtitle")
         ),
         div(
           class = "app-header-actions",
+          div(
+            class = "app-region-toggle",
+            radioButtons(
+              inputId = "region",
+              label = "Region:",
+              choices = c("Brazil" = "brazil", "Global" = "global"),
+              selected = "brazil",
+              inline = TRUE
+            )
+          ),
           actionButton(
             inputId = "open_settings",
             label = "Settings",
@@ -81,17 +91,6 @@ app_ui <- function(request) {
                 mod_company_analysis_ui("company_analysis")
               )
             )
-          )
-        )
-      ),
-      div(
-        class = "app-footer",
-        div(
-          class = "app-footer-logos",
-          tags$img(
-            src = "www/FiBras_II_Coop_BaCen_Curupira_Theia.png",
-            alt = "Project logo",
-            class = "partner-logo"
           )
         )
       )
