@@ -116,6 +116,121 @@ testthat::test_that("mod_hazards_events_server exposes events reactive", {
   })
 })
 
+testthat::test_that("mod_hazards_events_server adds a probabilistic (AAL) event with return_period/event_year left NA", {
+  testthat::skip_on_ci()
+  testthat::skip_if_not_installed("shiny")
+  hazard_configs <- list(
+    Flood = list(
+      primary_indicator = "depth",
+      indicators = list(depth = list(index = c("scenario_name", "return_period")))
+    )
+  )
+  shiny::testServer(mod_hazards_events_server, args = list(
+    id = "hz",
+    hazards_inventory = shiny::reactive({
+      data.frame(
+        hazard_type = c("Flood", "Flood"),
+        hazard_indicator = c("depth", "depth"),
+        scenario_name = c("rcp85", "rcp85"),
+        return_period = c(100, 10),
+        hazard_name = c(
+          "Flood__depth__GWL=rcp85__RP=100__ensemble=mean",
+          "Flood__depth__GWL=rcp85__RP=10__ensemble=mean"
+        ),
+        stringsAsFactors = FALSE
+      )
+    }),
+    hazard_configs = shiny::reactive(hazard_configs)
+  ), {
+    session$setInputs("calc_mode_1" = "probabilistic")
+    session$setInputs("hazard_type_1" = "Flood")
+    session$setInputs("filter_1_scenario_name" = "rcp85")
+    session$setInputs(add_event = 1)
+
+    ev <- events_rv()
+    testthat::expect_equal(nrow(ev), 1)
+    testthat::expect_equal(ev$calc_mode[1], "probabilistic")
+    testthat::expect_equal(ev$hazard_type[1], "Flood")
+    testthat::expect_equal(ev$scenario_name[1], "rcp85")
+    testthat::expect_true(is.na(ev$return_period[1]))
+    testthat::expect_true(is.na(ev$event_year[1]))
+    testthat::expect_equal(ev$spatial_level[1], "brazil")
+  })
+})
+
+testthat::test_that("mod_hazards_events_server rejects probabilistic mode for hazards without an AAL engine", {
+  testthat::skip_on_ci()
+  testthat::skip_if_not_installed("shiny")
+  hazard_configs <- list(
+    Heat = list(
+      primary_indicator = "hi",
+      indicators = list(hi = list(index = c("scenario_name", "return_period")))
+    )
+  )
+  shiny::testServer(mod_hazards_events_server, args = list(
+    id = "hz",
+    hazards_inventory = shiny::reactive({
+      data.frame(
+        hazard_type = "Heat",
+        hazard_indicator = "hi",
+        scenario_name = "rcp85",
+        return_period = 50,
+        hazard_name = "Heat__hi__GWL=rcp85__RP=50__ensemble=mean",
+        stringsAsFactors = FALSE
+      )
+    }),
+    hazard_configs = shiny::reactive(hazard_configs)
+  ), {
+    session$setInputs("calc_mode_1" = "probabilistic")
+    session$setInputs("hazard_type_1" = "Heat")
+    session$setInputs("filter_1_scenario_name" = "rcp85")
+    session$setInputs(add_event = 1)
+
+    # Heat has no Probabilistic/AAL engine in v1 -- the event must not be added.
+    ev <- events_rv()
+    testthat::expect_equal(nrow(ev), 0)
+  })
+})
+
+testthat::test_that("mod_hazards_events_server deterministic events are tagged calc_mode = 'deterministic'", {
+  testthat::skip_on_ci()
+  testthat::skip_if_not_installed("shiny")
+  hazard_configs <- list(
+    Flood = list(
+      primary_indicator = "depth",
+      indicators = list(depth = list(index = c("scenario_name", "return_period")))
+    )
+  )
+  shiny::testServer(mod_hazards_events_server, args = list(
+    id = "hz",
+    hazards_inventory = shiny::reactive({
+      data.frame(
+        hazard_type = "Flood",
+        hazard_indicator = "depth",
+        scenario_name = "rcp85",
+        return_period = 100,
+        hazard_name = "Flood__depth__GWL=rcp85__RP=100__ensemble=mean",
+        stringsAsFactors = FALSE
+      )
+    }),
+    hazard_configs = shiny::reactive(hazard_configs)
+  ), {
+    # calc_mode_1 not set -- must still default to deterministic, exactly as
+    # before this feature existed (backward compatibility for existing behavior).
+    session$setInputs("hazard_type_1" = "Flood")
+    session$setInputs("filter_1_scenario_name" = "rcp85")
+    session$setInputs("filter_1_return_period" = 100)
+    session$setInputs("year_1" = 2030)
+    session$setInputs(add_event = 1)
+
+    ev <- events_rv()
+    testthat::expect_equal(nrow(ev), 1)
+    testthat::expect_equal(ev$calc_mode[1], "deterministic")
+    testthat::expect_equal(ev$return_period[1], 100)
+    testthat::expect_equal(ev$event_year[1], 2030L)
+  })
+})
+
 testthat::test_that("mod_hazards_events_server uses preloaded spatial data when provided", {
   testthat::skip_on_ci()
   testthat::skip_if_not_installed("shiny")

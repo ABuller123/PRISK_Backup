@@ -189,6 +189,74 @@ testthat::test_that("mod_status_server labels whole-area events 'Global (whole)'
   })
 })
 
+testthat::test_that("mod_status_server events table shows AAL placeholders for probabilistic events", {
+  testthat::skip_on_ci()
+  testthat::skip_if_not_installed("shiny")
+  test_events <- data.frame(
+    event_id = c("ev1", "ev2"),
+    hazard_type = c("Flood", "Flood"),
+    hazard_name = c(
+      "Flood__AAL__scenario_name=present",
+      "Flood__depth__GWL=rcp85__RP=100__ensemble=mean"
+    ),
+    scenario_name = c("present", "rcp85"),
+    return_period = c(NA_real_, 100),
+    event_year = c(NA_integer_, 2030L),
+    spatial_level = c("brazil", "brazil"),
+    spatial_region_codes = c(NA_character_, NA_character_),
+    spatial_region_labels = c(NA_character_, NA_character_),
+    calc_mode = c("probabilistic", "deterministic"),
+    stringsAsFactors = FALSE
+  )
+
+  shiny::testServer(mod_status_server, args = list(
+    id = "test",
+    status_reactive = shiny::reactive("Ready"),
+    events_reactive = shiny::reactive(test_events)
+  ), {
+    session$flushReact()
+    events_output <- session$userData$status_events_table
+
+    testthat::expect_true(!is.null(events_output))
+    testthat::expect_equal(events_output$Mode[1], "Probabilistic")
+    testthat::expect_equal(events_output$`Return Period (years)`[1], "All RPs (AAL)")
+    testthat::expect_equal(events_output$`Shock Year`[1], "N/A (all years)")
+
+    testthat::expect_equal(events_output$Mode[2], "Deterministic")
+    testthat::expect_equal(events_output$`Return Period (years)`[2], "100")
+    testthat::expect_equal(events_output$`Shock Year`[2], "2030")
+  })
+})
+
+testthat::test_that("mod_status_server events table defaults missing calc_mode to Deterministic", {
+  testthat::skip_on_ci()
+  testthat::skip_if_not_installed("shiny")
+  # Simulates events saved/loaded before calc_mode existed.
+  test_events <- data.frame(
+    event_id = c("ev1"),
+    hazard_type = c("Flood"),
+    hazard_name = c("Flood__depth__GWL=rcp85__RP=100__ensemble=mean"),
+    scenario_name = c("rcp85"),
+    return_period = c(100),
+    event_year = c(2030L),
+    spatial_level = c("brazil"),
+    spatial_region_codes = c(NA_character_),
+    spatial_region_labels = c(NA_character_),
+    stringsAsFactors = FALSE
+  )
+
+  shiny::testServer(mod_status_server, args = list(
+    id = "test",
+    status_reactive = shiny::reactive("Ready"),
+    events_reactive = shiny::reactive(test_events)
+  ), {
+    session$flushReact()
+    events_output <- session$userData$status_events_table
+
+    testthat::expect_equal(events_output$Mode[1], "Deterministic")
+  })
+})
+
 testthat::test_that("reconcile_event_toggle_states preserves existing values and enables new ids", {
   current <- c(ev1 = FALSE, ev2 = TRUE)
   next_states <- reconcile_event_toggle_states(c("ev1", "ev3"), current)

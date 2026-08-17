@@ -400,10 +400,23 @@ app_server <- function(input, output, session) {
           return()
         }
 
-        # Reconcile events with currently loaded hazards using inventory
+        if (!"calc_mode" %in% names(ev_df)) ev_df$calc_mode <- "deterministic"
+        ev_df$calc_mode <- dplyr::coalesce(ev_df$calc_mode, "deterministic")
+
+        run_mode <- unique(ev_df$calc_mode)
+        if (length(run_mode) > 1) {
+          values$status <- "Error: Cannot mix Deterministic and Probabilistic events in one run — remove one type first."
+          return()
+        }
+        run_mode <- run_mode[[1]]
+
+        # Reconcile events with currently loaded hazards using inventory.
         # For TIF: inventory.hazard_name matches event.hazard_name (new format)
         # For NC: inventory.hazard_name matches event.hazard_name (base event without ensemble)
-        if ("hazard_name" %in% names(ev_df)) {
+        # Probabilistic events have a synthetic hazard_name (e.g. "Flood__AAL__...")
+        # that never matches a single raster's name by design -- exempt them here;
+        # their own validity is checked inside compute_risk_probabilistic().
+        if ("hazard_name" %in% names(ev_df) && identical(run_mode, "deterministic")) {
           inventory_hazard_names <- values$hazards_inventory$hazard_name
           keep <- ev_df$hazard_name %in% inventory_hazard_names
           if (any(!keep)) {
@@ -412,6 +425,54 @@ app_server <- function(input, output, session) {
           }
           ev_df <- ev_df[keep, , drop = FALSE]
         }
+
+        if (nrow(ev_df) == 0) {
+          values$status <- "Error: No configured events matched the currently loaded hazards. Please review your hazard events."
+          return()
+        }
+
+        run_hazards_dir <- resolve_hazards_dir(base_dir, region())
+
+        if (identical(run_mode, "probabilistic")) {
+          # ------------------------------------------------------------------
+          # PROBABILISTIC (AAL) PATH -- fully separate from the deterministic
+          # path below; never calls compute_risk() or touches its state.
+          # ------------------------------------------------------------------
+          progress <- shiny::Progress$new(session, min = 0, max = 1)
+          progress$set(message = "Running probabilistic (AAL) analysis...", value = 0)
+          on.exit(progress$close(), add = TRUE)
+
+          results <- compute_risk_probabilistic(
+            assets = values$assets,
+            companies = companies,
+            events = ev_df,
+            hazards = values$hazards,
+            hazards_inventory = values$hazards_inventory,
+            hazard_configs = values$hazard_configs,
+            hazards_dir = run_hazards_dir,
+            precomputed_hazards = values$precomputed_hazards,
+            growth_rate = control$growth_rate(),
+            discount_rate = control$discount_rate(),
+            risk_free_rate = control$risk_free_rate(),
+            on_progress = function(value, msg) {
+              progress$set(value = value, detail = msg)
+            }
+          )
+
+          values$results <- results
+          values$results_uncertainty <- NULL
+          values$run_events <- ev_df
+          control$set_results(results)
+          values$status <- "Analysis complete. Check the Profit Pathways and Company Analysis tabs for detailed results."
+
+          updateTabsetPanel(session, "main_tabs", selected = "assets")
+          return()
+        }
+
+        # ------------------------------------------------------------------
+        # DETERMINISTIC PATH -- unchanged from the existing single-event-year
+        # behavior (uncertainty mode, compute_risk(), everything below).
+        # ------------------------------------------------------------------
 
         # Run the complete climate risk analysis using pre-loaded data
         use_uncertainty <- isTRUE(settings$uncertainty_mode())
@@ -424,7 +485,7 @@ app_server <- function(input, output, session) {
         # Load NC hazards for a specific ensemble target. TIF hazards (flood) don't
         # have an ensemble dimension so they use the default hazards object.
         # Returns list(hazards, inventory) with the target ensemble's rasters and keys.
-        run_hazards_dir <- resolve_hazards_dir(base_dir, region())
+        # (run_hazards_dir computed once above, shared by both calc-mode branches)
 
         load_unc_hazards <- function(target_ensemble) {
           result <- try(load_hazards_and_inventory(
