@@ -15,9 +15,46 @@ testthat::test_that("mod_status_ui creates expected elements", {
   testthat::expect_true(grepl("copyStatusReproCode\\(this\\)", html))
   testthat::expect_true(grepl("Analysis Status", html))
   testthat::expect_true(grepl("Configured Hazard Events", html))
-  testthat::expect_true(grepl("Selected Event Areas in Brazil", html))
+  # Map title is rendered server-side (region-aware: Brazil vs Global) via uiOutput,
+  # so the static UI markup only contains the placeholder, not the text itself.
+  testthat::expect_true(grepl("test-map_title", html))
   testthat::expect_true(grepl("Reproduction Code", html))
   testthat::expect_true(grepl("Copy to Clipboard", html))
+})
+
+testthat::test_that("mod_status_server renders region-aware map title", {
+  shiny::testServer(mod_status_server, args = list(
+    id = "test",
+    status_reactive = shiny::reactive("Ready"),
+    events_reactive = shiny::reactive(tibble::tibble())
+  ), {
+    session$flushReact()
+    testthat::expect_true(grepl("Selected Event Areas in Brazil", output$map_title$html))
+  })
+
+  shiny::testServer(mod_status_server, args = list(
+    id = "test",
+    status_reactive = shiny::reactive("Ready"),
+    events_reactive = shiny::reactive(tibble::tibble()),
+    region_reactive = shiny::reactive("global")
+  ), {
+    session$flushReact()
+    testthat::expect_true(grepl("Selected Event Areas \\(Global\\)", output$map_title$html))
+    testthat::expect_false(grepl("Brazil", output$map_title$html))
+  })
+})
+
+testthat::test_that("build_status_global_map returns a plotly object with and without assets", {
+  empty_plot <- build_status_global_map(NULL)
+  testthat::expect_s3_class(empty_plot, "plotly")
+
+  assets <- tibble::tibble(
+    asset = c("A1", "A2"),
+    latitude = c(52.5, 40.7),
+    longitude = c(13.4, -74.0)
+  )
+  plot_with_points <- build_status_global_map(assets)
+  testthat::expect_s3_class(plot_with_points, "plotly")
 })
 
 build_status_test_spatial_data <- function() {
@@ -119,6 +156,36 @@ testthat::test_that("mod_status_server displays events with event_id", {
     testthat::expect_true("Spatial Separation" %in% colnames(events_output))
     testthat::expect_equal(events_output$`Event ID`, c("ev1", "ev2"))
     testthat::expect_equal(events_output$`Spatial Separation`[2], "Brazil (whole)")
+  })
+})
+
+testthat::test_that("mod_status_server labels whole-area events 'Global (whole)' in Global mode", {
+  testthat::skip_on_ci()
+  testthat::skip_if_not_installed("shiny")
+  test_events <- data.frame(
+    event_id = c("ev1"),
+    hazard_type = c("Flood"),
+    hazard_name = c("Flood__flood_depth__return_period=10__scenario_name=present__ensemble=mean"),
+    scenario_name = c("present"),
+    return_period = c(10),
+    event_year = c(2030L),
+    spatial_level = c("brazil"),
+    spatial_region_codes = c(NA_character_),
+    spatial_region_labels = c(NA_character_),
+    stringsAsFactors = FALSE
+  )
+
+  shiny::testServer(mod_status_server, args = list(
+    id = "test",
+    status_reactive = shiny::reactive("Ready"),
+    events_reactive = shiny::reactive(test_events),
+    region_reactive = shiny::reactive("global")
+  ), {
+    session$flushReact()
+    events_output <- session$userData$status_events_table
+
+    testthat::expect_true(!is.null(events_output))
+    testthat::expect_equal(events_output$`Spatial Separation`[1], "Global (whole)")
   })
 })
 

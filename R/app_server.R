@@ -27,6 +27,13 @@ app_server <- function(input, output, session) {
   )
   settings_modal_open <- shiny::reactiveVal(FALSE)
 
+  # Region toggle: "brazil" (default, full existing pipeline) or "global"
+  # (flood-hazard-only, global flood rasters, no Brazil ADM/spatial-separation data)
+  region <- shiny::reactive({
+    v <- input$region
+    if (is.null(v) || !nzchar(v)) "brazil" else v
+  })
+
   # Create the reactive variables expected by tests
   data_loaded <- reactive({
     values$data_loaded
@@ -114,8 +121,15 @@ app_server <- function(input, output, session) {
     overrides_reload = overrides_reload,
     spatial_data_reactive = reactive({
       values$spatial_separation_data
-    })
+    }),
+    region_reactive = region
   )
+
+  # Force a full static-data reload when the region toggle changes (e.g. switching
+  # from Brazil to Global needs to drop ADM boundaries and reload the flood-only config)
+  shiny::observeEvent(region(), {
+    values$data_loaded <- FALSE
+  }, ignoreInit = TRUE)
 
   run_repro_spec <- shiny::reactive({
     events <- try(control$events(), silent = TRUE)
@@ -146,6 +160,10 @@ app_server <- function(input, output, session) {
     }),
     spatial_data_reactive = reactive({
       values$spatial_separation_data
+    }),
+    region_reactive = region,
+    assets_reactive = reactive({
+      values$assets
     })
   )
 
@@ -203,13 +221,18 @@ app_server <- function(input, output, session) {
         values$hazards_inventory <- hazards_result$inventory
         values$hazard_configs <- hazards_result$configs
 
-        # Load supporting data files from base_dir
-        # Pass hazard_configs to read_precomputed_hazards to ensure overrides are applied
-        values$precomputed_hazards <- read_precomputed_hazards(base_dir, hazard_configs = values$hazard_configs)
-        
+        # precomputed_hazards and cnae_exposure are always resolved against the Brazil
+        # hazard config, regardless of the active region: both are structurally required
+        # by compute_risk() (non-empty data.frame checks) but are ADM-code / CNAE-code
+        # lookup tables that Global-mode (lat/long-only) assets never actually query.
+        # This keeps Brazil-mode behavior byte-for-byte identical to before.
+        brazil_hazard_configs <- load_hazard_configs(hazards_dir = file.path(base_dir, "hazards", "config"))
+
+        values$precomputed_hazards <- read_precomputed_hazards(base_dir, hazard_configs = brazil_hazard_configs)
+
         # Load mandatory CNAE exposure mapping (required for sector resolution and validation)
-        mapping_hazards <- names(values$hazard_configs)[vapply(
-          values$hazard_configs,
+        mapping_hazards <- names(brazil_hazard_configs)[vapply(
+          brazil_hazard_configs,
           function(cfg) {
             !is.null(cfg$mappings) && "cnae_exposure" %in% names(cfg$mappings)
           },
@@ -220,7 +243,7 @@ app_server <- function(input, output, session) {
         }
         values$cnae_exposure <- load_mapping_from_config(
           base_dir = base_dir,
-          hazard_configs = values$hazard_configs,
+          hazard_configs = brazil_hazard_configs,
           hazard_type = mapping_hazards[[1]],
           mapping_key = "cnae_exposure"
         )
@@ -228,41 +251,52 @@ app_server <- function(input, output, session) {
           stop("Mandatory mapping 'cnae_exposure' is empty or invalid")
         }
 
-        # Load ADM1 and ADM2 boundaries for state assignment and validation
-        state_path <- file.path(base_dir, "areas", "state", "geoBoundaries-BRA-ADM1_simplified.geojson")
-        municipality_path <- file.path(base_dir, "areas", "municipality", "geoBoundaries-BRA-ADM2_simplified.geojson")
-        adm_codes <- try(load_adm_codes(base_dir), silent = TRUE)
-        if (inherits(adm_codes, "try-error")) {
-          adm_codes <- NULL
-        }
-        values$adm1_boundaries <- sf::st_read(state_path, quiet = TRUE)
-        values$adm2_boundaries <- sf::st_read(municipality_path, quiet = TRUE)
-        values$adm1_boundaries <- repair_adm_boundary_names(values$adm1_boundaries, adm_codes, "adm1")
-        values$adm2_boundaries <- repair_adm_boundary_names(values$adm2_boundaries, adm_codes, "adm2")
+        if (identical(region(), "brazil")) {
+          # Load ADM1 and ADM2 boundaries for state assignment and validation
+          state_path <- file.path(base_dir, "areas", "state", "geoBoundaries-BRA-ADM1_simplified.geojson")
+          municipality_path <- file.path(base_dir, "areas", "municipality", "geoBoundaries-BRA-ADM2_simplified.geojson")
+          adm_codes <- try(load_adm_codes(base_dir), silent = TRUE)
+          if (inherits(adm_codes, "try-error")) {
+            adm_codes <- NULL
+          }
+          values$adm1_boundaries <- sf::st_read(state_path, quiet = TRUE)
+          values$adm2_boundaries <- sf::st_read(municipality_path, quiet = TRUE)
+          values$adm1_boundaries <- repair_adm_boundary_names(values$adm1_boundaries, adm_codes, "adm1")
+          values$adm2_boundaries <- repair_adm_boundary_names(values$adm2_boundaries, adm_codes, "adm2")
 
-        values$spatial_separation_data <- load_spatial_separation_data(
-          base_dir = base_dir,
-          adm1_boundaries = values$adm1_boundaries,
-          adm2_boundaries = values$adm2_boundaries,
-          adm_codes = adm_codes
-        )
-        values$spatial_separation_warnings <- if (
-          !is.null(values$spatial_separation_data) &&
-          "warnings" %in% names(values$spatial_separation_data) &&
-          !is.null(values$spatial_separation_data$warnings)
-        ) {
-          unique(as.character(values$spatial_separation_data$warnings))
+          values$spatial_separation_data <- load_spatial_separation_data(
+            base_dir = base_dir,
+            adm1_boundaries = values$adm1_boundaries,
+            adm2_boundaries = values$adm2_boundaries,
+            adm_codes = adm_codes
+          )
+          values$spatial_separation_warnings <- if (
+            !is.null(values$spatial_separation_data) &&
+            "warnings" %in% names(values$spatial_separation_data) &&
+            !is.null(values$spatial_separation_data$warnings)
+          ) {
+            unique(as.character(values$spatial_separation_data$warnings))
+          } else {
+            character()
+          }
+
+          # Load region name mapping for displaying original names in frontend
+          # Pass already loaded boundaries to avoid redundant file reads
+          values$region_name_mapping <- load_region_name_mapping(
+            base_dir,
+            adm1_sf = values$adm1_boundaries,
+            adm2_sf = values$adm2_boundaries
+          )
         } else {
-          character()
+          # Global mode: no Brazil ADM boundaries, no hydro-region spatial separation,
+          # no ADM name mapping. compute_risk() cleanly skips the ADM-assignment and
+          # coherence-validation steps when adm1_boundaries is NULL.
+          values$adm1_boundaries <- NULL
+          values$adm2_boundaries <- NULL
+          values$spatial_separation_data <- NULL
+          values$spatial_separation_warnings <- character()
+          values$region_name_mapping <- NULL
         }
-
-        # Load region name mapping for displaying original names in frontend
-        # Pass already loaded boundaries to avoid redundant file reads
-        values$region_name_mapping <- load_region_name_mapping(
-          base_dir, 
-          adm1_sf = values$adm1_boundaries, 
-          adm2_sf = values$adm2_boundaries
-        )
 
         values$status <- "Data files loaded. Ready to select input folder and run analysis."
         values$data_loaded <- TRUE
@@ -297,7 +331,9 @@ app_server <- function(input, output, session) {
         
         # ALSO reload precomputed_hazards with new configs to ensure ensemble names and keys are updated
         # This is critical for assets without coordinates to match the new inventory
-        values$precomputed_hazards <- read_precomputed_hazards(base_dir, hazard_configs = values$hazard_configs)
+        # (always resolved against the Brazil config regardless of region — see load_all_static_files)
+        brazil_hazard_configs <- load_hazard_configs(hazards_dir = file.path(base_dir, "hazards", "config"))
+        values$precomputed_hazards <- read_precomputed_hazards(base_dir, hazard_configs = brazil_hazard_configs)
       }
     } else if (!is.null(base_dir) && base_dir != "") {
       values$status <- "Loading hazards..."
@@ -317,35 +353,27 @@ app_server <- function(input, output, session) {
       return()
     }
     if (is.null(input_folder) || input_folder == "") {
-      values$status <- "Error: Please select an input folder containing asset_information.xlsx or asset_information.csv, and company_information.xlsx or company_information.csv files."
+      values$status <- "Error: Please select an input folder containing asset_information.xlsx/csv (or assets.xlsx/csv), and company_information.xlsx/csv (or financials.xlsx/csv + portfolio.xlsx/csv) files."
       return()
     }
-    
-    # Check that both required files exist in the selected folder (Excel or CSV)
-    asset_xlsx <- file.path(input_folder, "asset_information.xlsx")
-    asset_csv <- file.path(input_folder, "asset_information.csv")
-    company_xlsx <- file.path(input_folder, "company_information.xlsx")
-    company_csv <- file.path(input_folder, "company_information.csv")
-    
-    asset_has_xlsx <- file.exists(asset_xlsx)
-    asset_has_csv <- file.exists(asset_csv)
-    company_has_xlsx <- file.exists(company_xlsx)
-    company_has_csv <- file.exists(company_csv)
-    
-    # Check for conflicts (both formats exist)
-    if ((asset_has_xlsx && asset_has_csv) || (company_has_xlsx && company_has_csv)) {
+
+    # Check that both required files exist in the selected folder (legacy or new format)
+    file_status <- resolve_input_file_status(input_folder)
+
+    # Check for conflicts (both formats exist, or duplicate xlsx/csv)
+    if (file_status$asset$status == "conflict" || file_status$company$status == "conflict") {
       conflicts <- c()
-      if (asset_has_xlsx && asset_has_csv) conflicts <- c(conflicts, "asset_information")
-      if (company_has_xlsx && company_has_csv) conflicts <- c(conflicts, "company_information")
-      values$status <- paste0("Error: Both Excel and CSV formats found for: ", paste(conflicts, collapse = ", "), ". Please use only one format per file type.")
+      if (file_status$asset$status == "conflict") conflicts <- c(conflicts, "asset_information/assets")
+      if (file_status$company$status == "conflict") conflicts <- c(conflicts, "company_information/financials+portfolio")
+      values$status <- paste0("Error: Conflicting input files found for: ", paste(conflicts, collapse = ", "), ". Please use only one format per file type.")
       return()
     }
-    
+
     # Check that at least one format exists for each file
-    if ((!asset_has_xlsx && !asset_has_csv) || (!company_has_xlsx && !company_has_csv)) {
+    if (file_status$asset$status == "missing" || file_status$company$status == "missing") {
       missing <- c()
-      if (!asset_has_xlsx && !asset_has_csv) missing <- c(missing, "asset_information.xlsx or asset_information.csv")
-      if (!company_has_xlsx && !company_has_csv) missing <- c(missing, "company_information.xlsx or company_information.csv")
+      if (file_status$asset$status == "missing") missing <- c(missing, "asset_information.xlsx/csv or assets.xlsx/csv")
+      if (file_status$company$status == "missing") missing <- c(missing, "company_information.xlsx/csv or financials.xlsx/csv + portfolio.xlsx/csv")
       values$status <- paste0("Error: Missing required files in selected folder: ", paste(missing, collapse = ", "))
       return()
     }
@@ -396,11 +424,13 @@ app_server <- function(input, output, session) {
         # Load NC hazards for a specific ensemble target. TIF hazards (flood) don't
         # have an ensemble dimension so they use the default hazards object.
         # Returns list(hazards, inventory) with the target ensemble's rasters and keys.
+        run_hazards_dir <- resolve_hazards_dir(base_dir, region())
+
         load_unc_hazards <- function(target_ensemble) {
           result <- try(load_hazards_and_inventory(
-            hazards_dir        = file.path(base_dir, "hazards", "config"),
+            hazards_dir        = run_hazards_dir,
             hazard_indicators_dir = file.path(base_dir, "hazards", "indicators"),
-            hazards_override_path = file.path(base_dir, "hazards", "config", "config_overrides.yml"),
+            hazards_override_path = file.path(run_hazards_dir, "config_overrides.yml"),
             aggregate_factor   = 1L,
             ensemble_filter    = target_ensemble
           ), silent = TRUE)
@@ -441,7 +471,7 @@ app_server <- function(input, output, session) {
               hazards_inventory = hazards_inv,
               precomputed_hazards = values$precomputed_hazards,
               hazard_configs = values$hazard_configs,
-              hazards_dir = file.path(base_dir, "hazards", "config"),
+              hazards_dir = run_hazards_dir,
               cnae_exposure = values$cnae_exposure,
               adm1_boundaries = values$adm1_boundaries,
               adm2_boundaries = values$adm2_boundaries,

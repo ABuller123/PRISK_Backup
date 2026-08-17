@@ -1,0 +1,6 @@
+#### Testing for Training
+base_dir <- "/Users/2diigermany/Desktop/Work/TCM/PRISK Repo/Climate RIsk model Data folder with floods/Climate Risk Model Data_final"
+devtools::load_all()
+library(climate.risk.tool)
+
+run_app(base_dir)
