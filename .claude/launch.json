@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "climate-risk-tool",
+      "runtimeExecutable": "Rscript",
+      "runtimeArgs": [
+        "-e",
+        "options(shiny.port=3838, shiny.host='127.0.0.1'); devtools::load_all('.', quiet=TRUE); run_app(base_dir='/Users/2diigermany/Desktop/Work/TCM/PRISK Repo/Climate RIsk model Data folder with floods/Climate Risk Model Data_final')"
+      ],
+      "port": 3838
+    }
+  ]
+}

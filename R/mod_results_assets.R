@@ -409,6 +409,9 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
 
       if (!is.null(aal_summary) && is.data.frame(aal_summary) && nrow(aal_summary) > 0) {
         aal_display <- aal_summary |>
+          dplyr::mutate(
+            aal_pd_profit = paste0("$", formatC(round(.data$aal_pd_profit), format = "f", digits = 0, big.mark = ","))
+          ) |>
           dplyr::rename(
             "AAL Physical Damage - Profit ($)" = "aal_pd_profit",
             "AAL Physical Damage - Revenue Rate" = "aal_pd_revenue_rate",

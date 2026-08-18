@@ -23,15 +23,30 @@ app_server <- function(input, output, session) {
     adm2_boundaries = NULL,
     region_name_mapping = NULL,
     spatial_separation_data = NULL,
-    spatial_separation_warnings = character()
+    spatial_separation_warnings = character(),
+    # TRISK-PRISK Integration mode state -- kept completely separate from the
+    # Physical Risk Analysis mode's `results`/`assets`/etc above.
+    trisk_prisk_results = NULL,
+    trisk_prisk_joined = NULL,
+    trisk_prisk_status = "Select a PRISK input folder and a TRISK output file, then click Run."
   )
   settings_modal_open <- shiny::reactiveVal(FALSE)
 
   # Region toggle: "brazil" (default, full existing pipeline) or "global"
   # (flood-hazard-only, global flood rasters, no Brazil ADM/spatial-separation data)
+  # -- only relevant in Physical Risk Analysis mode.
   region <- shiny::reactive({
     v <- input$region
     if (is.null(v) || !nzchar(v)) "brazil" else v
+  })
+
+  # App Mode toggle: "prisk" (default, the existing Region-driven single-hazard
+  # flood tool, completely unchanged) or "trisk_prisk" (the new TRISK-PRISK
+  # Integration mode below). Independent of `region`, which only applies to
+  # "prisk" mode.
+  app_mode <- shiny::reactive({
+    v <- input$app_mode
+    if (is.null(v) || !nzchar(v)) "prisk" else v
   })
 
   # Create the reactive variables expected by tests
@@ -130,6 +145,156 @@ app_server <- function(input, output, session) {
   shiny::observeEvent(region(), {
     values$data_loaded <- FALSE
   }, ignoreInit = TRUE)
+
+  # ==========================================================================
+  # TRISK-PRISK Integration mode -- a separate top-level flow (see app_mode
+  # above). Reuses read_assets()/read_companies()/compute_risk_trisk_prisk()
+  # and everything they call unmodified; never touches compute_risk(),
+  # compute_risk_probabilistic(), or the Region-driven state above.
+  # ==========================================================================
+
+  # TRISK-PRISK always uses the Global flood config (not the Region toggle,
+  # which only applies to Physical Risk Analysis mode): TRISK portfolios are
+  # typically international, and the Global flood dataset covers any country,
+  # unlike the Brazil-only one. Cached like mod_control_server's own
+  # hazards_and_inventory reactive -- only recomputes when base_dir changes,
+  # not on every "Run" click.
+  trisk_prisk_hazards_and_inventory <- shiny::reactive({
+    base_dir <- get_base_dir()
+    if (is.null(base_dir) || base_dir == "") {
+      return(NULL)
+    }
+    hazards_dir <- resolve_hazards_dir(base_dir, "global")
+    indicators_dir <- file.path(base_dir, "hazards", "indicators")
+    if (!dir.exists(hazards_dir) || !dir.exists(indicators_dir)) {
+      return(NULL)
+    }
+
+    result <- try(
+      load_hazards_and_inventory(
+        hazards_dir = hazards_dir,
+        hazard_indicators_dir = indicators_dir,
+        hazards_override_path = file.path(hazards_dir, "config_overrides.yml"),
+        aggregate_factor = 1L
+      ),
+      silent = TRUE
+    )
+    if (inherits(result, "try-error") || !is.list(result)) {
+      message(
+        "[app_server] Error loading TRISK-PRISK (Global flood) hazards: ",
+        if (inherits(result, "try-error")) attr(result, "condition")$message else "unknown"
+      )
+      return(NULL)
+    }
+    result
+  })
+
+  trisk_prisk_control <- mod_trisk_prisk_control_server(
+    "trisk_prisk_control",
+    base_dir_reactive = get_base_dir,
+    status_reactive = reactive({ values$trisk_prisk_status })
+  )
+
+  mod_trisk_prisk_asset_analysis_server(
+    "trisk_prisk_asset_analysis",
+    results_reactive = reactive({ values$trisk_prisk_results }),
+    trisk_joined_reactive = reactive({ values$trisk_prisk_joined })
+  )
+
+  mod_trisk_prisk_pathways_server(
+    "trisk_prisk_pathways",
+    results_reactive = reactive({ values$trisk_prisk_results }),
+    trisk_joined_reactive = reactive({ values$trisk_prisk_joined })
+  )
+
+  mod_trisk_prisk_outputs_server(
+    "trisk_prisk_outputs",
+    results_reactive = reactive({ values$trisk_prisk_results })
+  )
+
+  shiny::observeEvent(trisk_prisk_control$run_trigger(), {
+    base_dir <- get_base_dir()
+    prisk_folder <- trisk_prisk_control$prisk_folder()
+    trisk_file <- trisk_prisk_control$trisk_file_path()
+
+    if (is.null(base_dir) || base_dir == "") {
+      values$trisk_prisk_status <- "Error: Base directory is not set. Please restart the app with a valid base_dir."
+      return()
+    }
+    if (is.null(prisk_folder) || prisk_folder == "") {
+      values$trisk_prisk_status <- "Error: Please select a PRISK input folder first."
+      return()
+    }
+    if (is.null(trisk_file)) {
+      values$trisk_prisk_status <- "Error: Please select a TRISK output file (company_trajectories.csv or .xlsx) first."
+      return()
+    }
+    if (!isTRUE(trisk_prisk_control$hazard_added())) {
+      values$trisk_prisk_status <- "Error: Please select a hazard type and click 'Add Hazard' before running."
+      return()
+    }
+
+    file_status <- resolve_input_file_status(prisk_folder)
+    asset_ok <- file_status$asset$status %in% c("legacy", "new")
+    company_ok <- file_status$company$status %in% c("legacy", "new")
+    if (!asset_ok || !company_ok) {
+      values$trisk_prisk_status <- "Error: Selected PRISK folder is missing required asset/company input files (assets.xlsx/csv + financials.xlsx/csv + portfolio.xlsx/csv)."
+      return()
+    }
+
+    hazard_data <- trisk_prisk_hazards_and_inventory()
+    if (is.null(hazard_data)) {
+      values$trisk_prisk_status <- "Error: Could not load the Global flood hazard data. Check that base_dir/hazards/config_global exists."
+      return()
+    }
+
+    values$trisk_prisk_status <- "Running TRISK-PRISK analysis..."
+
+    tryCatch(
+      {
+        progress <- shiny::Progress$new(session, min = 0, max = 1)
+        progress$set(message = "Loading inputs...", value = 0)
+        on.exit(progress$close(), add = TRUE)
+
+        prisk_assets <- read_assets(prisk_folder)
+        prisk_companies <- read_companies(prisk_folder)
+        trisk_raw <- read_trisk_output(trisk_file$datapath)
+        trisk_joined <- join_trisk_to_prisk_assets(trisk_raw, prisk_assets)
+
+        progress$set(value = 0.1, detail = "Computing physical-risk-adjusted pathways...")
+
+        # precomputed_hazards is already loaded (and kept up to date) by the
+        # main load_all_static_files()/observe() block below, resolved against
+        # the Brazil config regardless of region for the same reason it's
+        # reused there: structurally required by the shared extraction
+        # machinery but never actually queried for coordinate-based assets.
+        results <- compute_risk_trisk_prisk(
+          trisk_joined = trisk_joined,
+          companies = prisk_companies,
+          hazards = hazard_data$hazards,
+          hazards_inventory = hazard_data$inventory,
+          hazard_configs = hazard_data$configs,
+          hazards_dir = resolve_hazards_dir(base_dir, "global"),
+          precomputed_hazards = values$precomputed_hazards,
+          growth_rate = trisk_prisk_control$growth_rate(),
+          discount_rate = trisk_prisk_control$discount_rate(),
+          risk_free_rate = trisk_prisk_control$risk_free_rate(),
+          include_terminal_value = trisk_prisk_control$include_terminal_value(),
+          on_progress = function(value, msg) {
+            progress$set(value = 0.1 + value * 0.9, detail = msg)
+          }
+        )
+
+        values$trisk_prisk_results <- results
+        values$trisk_prisk_joined <- trisk_joined
+        values$trisk_prisk_status <- "Analysis complete. See the Profit Pathways and Outputs tabs."
+      },
+      error = function(e) {
+        log_error_to_console(e, "TRISK-PRISK analysis")
+        values$trisk_prisk_status <- paste0("Error: ", conditionMessage(e))
+      }
+    )
+  })
 
   run_repro_spec <- shiny::reactive({
     events <- try(control$events(), silent = TRUE)
