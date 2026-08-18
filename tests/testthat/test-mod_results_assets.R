@@ -210,7 +210,7 @@ testthat::test_that("mod_results_assets_server shows AAL per asset and flood dep
     # AAL per asset, joined in from results$aal_channels$summary
     testthat::expect_true("AAL Physical Damage - Profit ($)" %in% names(probabilistic_table))
     testthat::expect_true("AAL Business Disruption - Revenue Rate" %in% names(probabilistic_table))
-    testthat::expect_equal(b1_row$`AAL Physical Damage - Profit ($)`, 66)
+    testthat::expect_equal(b1_row$`AAL Physical Damage - Profit ($)`, "$66")
     ag1_row <- dplyr::filter(probabilistic_table, asset == "AG1")
     testthat::expect_equal(ag1_row$`AAL Physical Damage - Revenue Rate`, 0.03575, tolerance = 1e-8)
   })

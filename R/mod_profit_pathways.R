@@ -544,7 +544,7 @@ create_profit_plot <- function(data, highlighted_assets, title, log_scale = FALS
         if (nzchar(sector_label)) paste0("Sector: ", sector_label, "<br>") else "",
         share_text,
         "Year: %{x}<br>",
-        "Profit: R$%{customdata:,.2f}%{text}",
+        "Profit: $%{customdata:,.2f}%{text}",
         "<extra></extra>"
       )
     } else {
@@ -554,7 +554,7 @@ create_profit_plot <- function(data, highlighted_assets, title, log_scale = FALS
         if (nzchar(sector_label)) paste0("Sector: ", sector_label, "<br>") else "",
         share_text,
         "Year: %{x}<br>",
-        "Profit: R$%{customdata:,.0f}<br>",
+        "Profit: $%{customdata:,.0f}<br>",
         "<extra></extra>"
       )
     }
@@ -580,7 +580,7 @@ create_profit_plot <- function(data, highlighted_assets, title, log_scale = FALS
 
   # Configure y-axis based on scale type
   yaxis_config <- list(
-    title = if (log_scale) "Profit (R$, log scale)" else "Profit (R$)",
+    title = if (log_scale) "Profit ($, log scale)" else "Profit ($)",
     showgrid = TRUE,
     gridcolor = "#DDE5EC"
   )
