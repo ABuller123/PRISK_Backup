@@ -168,6 +168,13 @@ normalize_hazard_config <- function(config, hazard_name, file_path = NULL) {
 
     indicator_source <- if (grepl("\\.nc$", indicator$file, ignore.case = TRUE)) "nc" else "tif"
 
+    # Optional engine marker. `global_heat_maps` selects the Global-mode heat
+    # engine (multi-band change maps blended by shock year; see utils__heat_global.R).
+    indicator_type <- indicator$type
+    if (is.null(indicator_type) || !nzchar(as.character(indicator_type))) {
+      indicator_type <- NA_character_
+    }
+
     indicator_index <- character(0)
     if (!is.null(indicator$index)) {
       indicator_index <- as.character(unlist(indicator$index, use.names = FALSE))
@@ -221,7 +228,8 @@ normalize_hazard_config <- function(config, hazard_name, file_path = NULL) {
       event_selection = as.character(indicator_event_selection),
       precomputed = indicator_precomputed,
       inference = indicator_inference,
-      source = indicator_source
+      source = indicator_source,
+      type = as.character(indicator_type)
     )
   }
 
@@ -378,10 +386,10 @@ normalize_hazard_config <- function(config, hazard_name, file_path = NULL) {
     }
   }
   spatial_separation_scheme <- tolower(as.character(spatial_separation_scheme))
-  if (!spatial_separation_scheme %in% c("adm_regions", "hydro_regions")) {
+  if (!spatial_separation_scheme %in% c("adm_regions", "hydro_regions", "global_basins", "global_adm")) {
     stop(
       "spatial_separation_scheme for hazard '", hazard_name,
-      "' must be one of: adm_regions, hydro_regions"
+      "' must be one of: adm_regions, hydro_regions, global_basins, global_adm"
     )
   }
 

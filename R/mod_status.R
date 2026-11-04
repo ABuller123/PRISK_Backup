@@ -102,21 +102,24 @@ mod_status_ui <- function(id) {
 #'   "Global (whole)" for Global-mode events.
 #' @noRd
 format_spatial_selection <- function(level, region_codes, region_labels, whole_area_label = "Brazil (whole)") {
-  parse_vals <- function(x) {
+  parse_vals <- function(x, split = "[|;,]") {
     if (is.null(x) || length(x) == 0 || is.na(x) || !nzchar(trimws(as.character(x)))) {
       return(character(0))
     }
-    vals <- unlist(strsplit(as.character(x), "[|;,]"))
+    vals <- unlist(strsplit(as.character(x), split))
     vals <- trimws(vals)
     vals[nzchar(vals)]
   }
 
   lvl <- tolower(trimws(as.character(level)))
+  if (!is.na(lvl) && identical(lvl, "global")) {
+    return("Global (whole)")
+  }
   if (is.na(lvl) || !nzchar(lvl) || lvl == "brazil") {
     return(whole_area_label)
   }
 
-  labels <- parse_vals(region_labels)
+  labels <- parse_vals(region_labels, split = "[|;]")  # labels may contain commas (basin names)
   codes <- parse_vals(region_codes)
 
   level_label <- dplyr::case_when(
@@ -125,6 +128,11 @@ format_spatial_selection <- function(level, region_codes, region_labels, whole_a
     lvl == "macro" ~ "Macro regions",
     lvl == "meso" ~ "Meso regions",
     lvl == "micro" ~ "Micro regions",
+    lvl == "level2" ~ "Basins (level 2)",
+    lvl == "level4" ~ "Basins (level 4)",
+    lvl == "adm0" ~ "Countries (ADM0)",
+    lvl == "adm1" ~ "ADM1 regions",
+    lvl == "adm2" ~ "ADM2 regions",
     TRUE ~ stringr::str_to_title(lvl)
   )
 
@@ -142,7 +150,7 @@ format_spatial_selection <- function(level, region_codes, region_labels, whole_a
 }
 
 #' @noRd
-parse_status_spatial_values <- function(x) {
+parse_status_spatial_values <- function(x, split = "[|;,]") {
   if (is.null(x) || length(x) == 0) {
     return(character(0))
   }
@@ -150,7 +158,7 @@ parse_status_spatial_values <- function(x) {
   if (is.na(x_chr) || !nzchar(trimws(x_chr))) {
     return(character(0))
   }
-  vals <- unlist(strsplit(x_chr, "[|;,]"))
+  vals <- unlist(strsplit(x_chr, split))
   vals <- trimws(vals)
   vals[nzchar(vals)]
 }
@@ -160,9 +168,15 @@ infer_status_spatial_scheme <- function(level, scheme) {
   lvl <- tolower(trimws(as.character(level)))
   sch <- tolower(trimws(as.character(scheme)))
 
-  if (is.na(sch) || !nzchar(sch) || !sch %in% c("adm_regions", "hydro_regions")) {
+  if (is.na(sch) || !nzchar(sch) || !sch %in% c("adm_regions", "hydro_regions", "global_basins", "global_adm")) {
     if (lvl %in% c("macro", "meso", "micro")) {
       return("hydro_regions")
+    }
+    if (lvl %in% names(GLOBAL_BASIN_LEVELS)) {
+      return("global_basins")
+    }
+    if (lvl %in% names(GLOBAL_ADM_LEVELS)) {
+      return("global_adm")
     }
     return("adm_regions")
   }
@@ -258,7 +272,7 @@ resolve_status_event_geometry <- function(event_row, spatial_data, brazil_geomet
   }
 
   selected_codes <- parse_status_spatial_values(event_row$spatial_region_codes)
-  selected_labels <- parse_status_spatial_values(event_row$spatial_region_labels)
+  selected_labels <- parse_status_spatial_values(event_row$spatial_region_labels, split = "[|;]")
 
   resolved_codes <- resolve_selected_region_codes(
     spatial_data = spatial_data,
@@ -390,8 +404,25 @@ empty_status_map_plot <- function(message_text) {
 #' @param assets Optional data.frame of assets (from read_assets()), with latitude/longitude columns
 #' @return plotly object
 #' @noRd
-build_status_global_map <- function(assets) {
-  plot <- plotly::plot_ly(type = "scattergeo", mode = "markers")
+build_status_global_map <- function(assets, event_geometries = list()) {
+  plot <- plotly::plot_geo()
+
+  # Selected basin polygons (one list element per event, an sf with event_id / region_label)
+  for (event_id in names(event_geometries)) {
+    event_sf <- event_geometries[[event_id]]
+    if (is.null(event_sf) || !inherits(event_sf, "sf") || nrow(event_sf) == 0) next
+    plot <- plot |>
+      plotly::add_sf(
+        data = event_sf |> dplyr::mutate(map_label = paste0("Event ", .data$event_id, ": ", .data$region_label)),
+        split = ~region_code,
+        color = I("#009C3B"),
+        alpha = 0.35,
+        stroke = I("#006B28"),
+        hoverinfo = "text",
+        text = ~map_label,
+        showlegend = FALSE
+      )
+  }
 
   has_coords <- !is.null(assets) && is.data.frame(assets) && nrow(assets) > 0 &&
     all(c("latitude", "longitude") %in% names(assets))
@@ -420,6 +451,7 @@ build_status_global_map <- function(assets) {
     plotly::layout(
       geo = list(
         scope = "world",
+        fitbounds = FALSE,
         projection = list(type = "natural earth"),
         showland = TRUE,
         landcolor = "#EFEFEF",
@@ -435,7 +467,27 @@ build_status_global_map <- function(assets) {
       staticPlot = FALSE,
       displayModeBar = FALSE,
       scrollZoom = FALSE
-    )
+    ) |>
+    keep_status_global_map_world_view()
+}
+
+#' Keep the Global status map on the whole world however many areas are drawn (internal)
+#'
+#' @description `add_sf()` stores each polygon layer's bounding box on its trace and
+#'   `plotly_build()` then writes the union of those boxes into the geo `lataxis`/`lonaxis`
+#'   ranges (overriding any layout setting), which zooms the map into the selected basins or
+#'   regions. The map is built here, the boxes are dropped and the full-world ranges set, so the
+#'   base map looks exactly as it does without a selection and the areas are simply coloured in.
+#' @noRd
+keep_status_global_map_world_view <- function(plot) {
+  built <- plotly::plotly_build(plot)
+  built$x$data <- lapply(built$x$data, function(trace) {
+    trace[["_bbox"]] <- NULL
+    trace
+  })
+  built$x$layout$geo$lataxis$range <- c(-90, 90)
+  built$x$layout$geo$lonaxis$range <- c(-180, 180)
+  built
 }
 
 #' status Server Functions
@@ -547,16 +599,21 @@ mod_status_server <- function(id, status_reactive, events_reactive, delete_event
     })
 
     output$events_map_toggles <- shiny::renderUI({
+      events <- events_for_map()
+
+      # Global mode: only events with a basin / administrative-region selection have an area to highlight.
       if (identical(region(), "global")) {
-        return(
-          shiny::tags$p(
-            "Event-area highlighting is not available in Global mode.",
-            class = "text-muted status-map-toggle-empty"
+        events <- events[events$spatial_level %in% c(names(GLOBAL_BASIN_LEVELS), names(GLOBAL_ADM_LEVELS)), , drop = FALSE]
+        if (nrow(events) == 0) {
+          return(
+            shiny::tags$p(
+              "No area selections to toggle yet. Choose a basin level and basins when adding a Flood hazard, or a country / ADM level and regions when adding a Heat hazard.",
+              class = "text-muted status-map-toggle-empty"
+            )
           )
-        )
+        }
       }
 
-      events <- events_for_map()
       if (nrow(events) == 0) {
         return(
           shiny::tags$p(
@@ -616,7 +673,28 @@ mod_status_server <- function(id, status_reactive, events_reactive, delete_event
             assets <- loaded
           }
         }
-        return(build_status_global_map(assets))
+
+        # Highlight the basins / regions selected for each visible event (multi-select, one colour
+        # layer per event), exactly like Brazil's event-area layers.
+        global_event_geometries <- list()
+        global_spatial <- spatial_data_for_map()
+        global_events <- events_for_map()
+        if (!is.null(global_spatial) && nrow(global_events) > 0) {
+          global_states <- map_toggle_states()
+          global_visible <- names(global_states)[vapply(global_states, isTRUE, logical(1))]
+          for (i in seq_len(nrow(global_events))) {
+            ev_row <- global_events[i, , drop = FALSE]
+            ev_id <- as.character(ev_row$event_id[[1]])
+            if (!ev_id %in% global_visible) next
+            geom <- try(resolve_global_event_geometry(ev_row, global_spatial), silent = TRUE)
+            if (!inherits(geom, "try-error") && !is.null(geom) && nrow(geom) > 0) {
+              global_event_geometries[[ev_id]] <- geom
+            }
+          }
+        }
+        session$userData$status_map_event_geometry_ids <- names(global_event_geometries)
+        session$userData$status_visible_map_event_ids <- names(global_event_geometries)
+        return(build_status_global_map(assets, global_event_geometries))
       }
 
       spatial_data <- spatial_data_for_map()
@@ -748,6 +826,7 @@ mod_status_server <- function(id, status_reactive, events_reactive, delete_event
         ) |>
         dplyr::select(
           "event_id", "hazard_type", "hazard_name", "mode_label", "scenario_name",
+          dplyr::any_of("statistic"),
           "return_period_display", "event_year_display", "spatial_selection"
         ) |>
         dplyr::rename(
@@ -756,6 +835,7 @@ mod_status_server <- function(id, status_reactive, events_reactive, delete_event
           "Hazard Name" = "hazard_name",
           "Mode" = "mode_label",
           "Scenario" = "scenario_name",
+          dplyr::any_of(c("Statistic" = "statistic")),
           "Return Period (years)" = "return_period_display",
           "Shock Year" = "event_year_display",
           "Spatial Separation" = "spatial_selection"
