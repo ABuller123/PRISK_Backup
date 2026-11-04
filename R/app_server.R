@@ -456,9 +456,12 @@ app_server <- function(input, output, session) {
           # Global mode: no Brazil ADM boundaries, no hydro-region spatial separation,
           # no ADM name mapping. compute_risk() cleanly skips the ADM-assignment and
           # coherence-validation steps when adm1_boundaries is NULL.
+          # Global spatial separation uses the named global basin shapefiles (Flood) and the
+          # geoBoundaries ADM0/1/2 shapefiles (Heat): only their attribute tables are read
+          # here; polygons are loaded lazily on first use (spatial join / status map).
           values$adm1_boundaries <- NULL
           values$adm2_boundaries <- NULL
-          values$spatial_separation_data <- NULL
+          values$spatial_separation_data <- load_global_spatial_data(base_dir)
           values$spatial_separation_warnings <- character()
           values$region_name_mapping <- NULL
         }

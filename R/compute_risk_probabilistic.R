@@ -20,15 +20,19 @@
 #'   `gather_and_pivot_results()` (inside `compute_companies_financials()`) and
 #'   the result-display modules that pivot on that string need no changes.
 #'
-#'   v1 scope: Flood only, and exactly one Probabilistic event per run (mixing
-#'   multiple climate scenarios, e.g. present + rcp85, in one summed AAL would
-#'   have no coherent physical interpretation the way summing distinct deterministic
-#'   hazard events in the same year does -- scenarios are alternative futures, not
-#'   concurrent, additive risks). Spatial separation is not applied in this
-#'   version (whole selected area only).
+#'   Scope: at most one Probabilistic event PER HAZARD TYPE per run -- Flood and/or
+#'   global Heat (labour productivity). Mixing multiple climate scenarios of the
+#'   same hazard (e.g. present + rcp85) in one summed AAL would have no coherent
+#'   physical interpretation -- scenarios are alternative futures -- but distinct
+#'   hazards are concurrent risks, so a Flood AAL and a Heat AAL add (as the
+#'   deterministic path adds distinct hazard events). Flood's AAL is constant over
+#'   the horizon; Heat's AAL is recomputed for every year from the blended maps
+#'   (see `compute_global_heat_aal()`). Spatial separation is not applied in
+#'   probabilistic mode (whole selected area only).
 #' @param assets tibble of asset data (from `read_assets()`)
 #' @param companies tibble of company data (from `read_companies()`)
-#' @param events tibble with exactly one row: hazard_type ("Flood"), scenario_name,
+#' @param events tibble with at most one row per hazard type: hazard_type ("Flood"
+#'   and/or the global heat hazard), scenario_name, (heat: statistic),
 #'   calc_mode ("probabilistic")
 #' @param hazards Named list of SpatRaster objects (from `load_hazards_and_inventory()`)
 #' @param hazards_inventory tibble from `load_hazards_and_inventory()$inventory`
@@ -81,41 +85,66 @@ compute_risk_probabilistic <- function(
   if ("calc_mode" %in% names(events) && !all(events$calc_mode == "probabilistic")) {
     stop("compute_risk_probabilistic: all events must have calc_mode == 'probabilistic'")
   }
-  if (!all(events$hazard_type == "Flood")) {
-    stop("compute_risk_probabilistic: only hazard_type 'Flood' is supported in this version")
-  }
-  if (nrow(events) > 1) {
+  hazards_inventory <- drop_heat_ui_inventory_columns(hazards_inventory)
+
+  heat_types <- global_heat_hazard_types(hazard_configs)
+  supported_types <- c("Flood", heat_types)
+  if (!all(events$hazard_type %in% supported_types)) {
     stop(
-      "compute_risk_probabilistic: only one Probabilistic (AAL) event is supported per run ",
+      "compute_risk_probabilistic: only hazard types ", paste(supported_types, collapse = ", "),
+      " are supported in this version"
+    )
+  }
+  if (anyDuplicated(events$hazard_type) > 0) {
+    stop(
+      "compute_risk_probabilistic: only one Probabilistic (AAL) event is supported per hazard type ",
       "in this version -- remove extra events. Climate scenarios are alternative futures, ",
       "not concurrent risks to sum."
     )
   }
-  if (is.null(hazard_configs) || !"Flood" %in% names(hazard_configs)) {
+  flood_events <- events[events$hazard_type == "Flood", , drop = FALSE]
+  heat_events <- events[events$hazard_type %in% heat_types, , drop = FALSE]
+  has_flood <- nrow(flood_events) > 0
+  has_heat <- nrow(heat_events) > 0
+  if (has_flood && (is.null(hazard_configs) || !"Flood" %in% names(hazard_configs))) {
     stop("compute_risk_probabilistic: hazard_configs must include a 'Flood' entry")
   }
-
-  hazard_type <- events$hazard_type[[1]]
-  scenario_name <- events$scenario_name[[1]]
 
   .report_progress(0.05, "Preparing inputs...")
   assets <- filter_assets_by_companies(assets, companies)
 
-  .report_progress(0.20, "Extracting hazard statistics for all return periods...")
-  assets_factors_by_rp <- extract_flood_depth_by_rp(
-    assets = assets,
-    hazards = hazards,
-    hazards_inventory = hazards_inventory,
-    hazard_configs = hazard_configs,
-    hazards_dir = hazards_dir,
-    precomputed_hazards = precomputed_hazards,
-    hazard_type = hazard_type,
-    scenario_name = scenario_name,
-    aggregation_method = aggregation_method
+  assets_factors_by_rp <- tibble::tibble()
+  aal <- list(
+    summary = tibble::tibble(
+      asset = unique(as.character(assets$asset)),
+      aal_pd_profit = 0, aal_pd_revenue_rate = 0, aal_bd_revenue_rate = 0
+    ),
+    detail = tibble::tibble(
+      asset = character(), return_period = numeric(), channel = character(),
+      loss = numeric(), aep = numeric()
+    )
   )
 
-  .report_progress(0.45, "Computing Average Annual Loss channels...")
-  aal <- compute_aal_channels(assets_factors_by_rp, hazard_configs[[hazard_type]])
+  if (has_flood) {
+    hazard_type <- flood_events$hazard_type[[1]]
+    scenario_name <- flood_events$scenario_name[[1]]
+
+    .report_progress(0.20, "Extracting hazard statistics for all return periods...")
+    assets_factors_by_rp <- extract_flood_depth_by_rp(
+      assets = assets,
+      hazards = hazards,
+      hazards_inventory = hazards_inventory,
+      hazard_configs = hazard_configs,
+      hazards_dir = hazards_dir,
+      precomputed_hazards = precomputed_hazards,
+      hazard_type = hazard_type,
+      scenario_name = scenario_name,
+      aggregation_method = aggregation_method
+    )
+
+    .report_progress(0.45, "Computing Average Annual Loss channels...")
+    aal <- compute_aal_channels(assets_factors_by_rp, hazard_configs[[hazard_type]])
+  }
 
   .report_progress(0.60, "Computing baseline revenue trajectories...")
   yearly_baseline <- compute_baseline_trajectories(
@@ -124,8 +153,32 @@ compute_risk_probabilistic <- function(
     growth_rate = growth_rate
   )
 
+  heat_aal <- NULL
+  if (has_heat) {
+    .report_progress(0.65, "Computing heat Average Annual Loss for every year...")
+    heat_aal <- compute_global_heat_aal(
+      assets = assets,
+      event = heat_events[1, , drop = FALSE],
+      hazard_configs = hazard_configs,
+      hazards_dir = hazards_dir,
+      years = unique(yearly_baseline$year)
+    )
+    for (msg in heat_aal$warnings) message(msg)
+    heat_aal <- add_heat_aal_revenue_adjustment(heat_aal, yearly_baseline)
+
+    aal$summary <- aal$summary |>
+      dplyr::left_join(heat_aal$summary, by = "asset") |>
+      dplyr::mutate(aal_lp_revenue_rate = dplyr::coalesce(.data$aal_lp_revenue_rate, 0))
+    aal$detail <- dplyr::bind_rows(aal$detail, heat_aal$detail)
+    aal$heat_yearly <- heat_aal$yearly
+    assets_factors_by_rp <- dplyr::bind_rows(assets_factors_by_rp, heat_aal$factors_by_rp)
+  }
+
   .report_progress(0.70, "Applying Average Annual Loss to every year...")
-  yearly_shock <- compute_aal_shock_trajectories(yearly_baseline, aal$summary, companies)
+  yearly_shock <- compute_aal_shock_trajectories(
+    yearly_baseline, aal$summary, companies,
+    aal_heat_yearly = if (has_heat) heat_aal$yearly else NULL
+  )
   yearly_scenarios <- concatenate_baseline_and_shock(yearly_baseline, yearly_shock)
 
   .report_progress(0.82, "Computing asset financials...")
@@ -139,7 +192,7 @@ compute_risk_probabilistic <- function(
 
   .report_progress(1.00, "Done.")
 
-  list(
+  out <- list(
     assets_factors = assets_factors_by_rp,
     companies = companies_result,
     assets_yearly = assets_discounted_yearly,
@@ -147,4 +200,8 @@ compute_risk_probabilistic <- function(
     aggregation_method = aggregation_method,
     aal_channels = aal
   )
+  if (has_heat && length(heat_aal$warnings) > 0) {
+    out$heat_warnings <- heat_aal$warnings
+  }
+  out
 }

@@ -73,6 +73,8 @@ compute_risk_trisk_prisk <- function(
     stop("compute_risk_trisk_prisk: companies must be a non-empty data.frame")
   }
 
+  hazards_inventory <- drop_heat_ui_inventory_columns(hazards_inventory)
+
   assets_unique <- trisk_joined |> dplyr::distinct(.data$asset, .keep_all = TRUE)
 
   .report_progress(0.10, "Computing interpolated AAL pathways...")
