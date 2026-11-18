@@ -31,11 +31,14 @@
 #'   (its maps are blended to each year's climate), so it is joined by asset AND
 #'   year and subtracted additively in the revenue step like the other revenue-rate
 #'   channels. NULL (the default) leaves the flood-only behavior unchanged.
+#' @param aal_drought_yearly Optional tibble(asset, year, aal_drought_revenue_rate) from
+#'   `compute_global_drought_aal()`; year-varying like heat and subtracted the same way.
 #' @return tibble with columns: asset, company, year, revenue, profit -- the same
 #'   shape `compute_shock_trajectories()` returns, so `concatenate_baseline_and_shock()`
 #'   accepts it unmodified
 #' @noRd
-compute_aal_shock_trajectories <- function(yearly_baseline_profits, aal_channels, companies, aal_heat_yearly = NULL) {
+compute_aal_shock_trajectories <- function(yearly_baseline_profits, aal_channels, companies, aal_heat_yearly = NULL,
+                                           aal_drought_yearly = NULL) {
   if (is.null(yearly_baseline_profits) || nrow(yearly_baseline_profits) == 0) {
     return(yearly_baseline_profits)
   }
@@ -59,7 +62,10 @@ compute_aal_shock_trajectories <- function(yearly_baseline_profits, aal_channels
   current_trajectories <- yearly_baseline_profits |>
     dplyr::select("asset", "company", "year", "revenue") |>
     dplyr::left_join(
-      aal_channels |> dplyr::select(-dplyr::any_of(c("aal_lp_revenue_rate", "avg_annual_revenue_adjustment"))),
+      aal_channels |> dplyr::select(-dplyr::any_of(c(
+        "aal_lp_revenue_rate", "avg_annual_revenue_adjustment",
+        "aal_drought_revenue_rate", "avg_annual_drought_revenue_adjustment"
+      ))),
       by = "asset"
     ) |>
     dplyr::mutate(
@@ -79,11 +85,23 @@ compute_aal_shock_trajectories <- function(yearly_baseline_profits, aal_channels
     current_trajectories$aal_lp_revenue_rate <- 0
   }
 
+  if (!is.null(aal_drought_yearly) && nrow(aal_drought_yearly) > 0) {
+    current_trajectories <- current_trajectories |>
+      dplyr::left_join(
+        aal_drought_yearly |> dplyr::select("asset", "year", "aal_drought_revenue_rate"),
+        by = c("asset", "year")
+      ) |>
+      dplyr::mutate(aal_drought_revenue_rate = dplyr::coalesce(.data$aal_drought_revenue_rate, 0))
+  } else {
+    current_trajectories$aal_drought_revenue_rate <- 0
+  }
+
   current_trajectories <- current_trajectories |>
     dplyr::mutate(
       revenue = pmax(
         0,
-        .data$revenue * (1 - .data$aal_pd_revenue_rate - .data$aal_bd_revenue_rate - .data$aal_lp_revenue_rate)
+        .data$revenue * (1 - .data$aal_pd_revenue_rate - .data$aal_bd_revenue_rate -
+          .data$aal_lp_revenue_rate - .data$aal_drought_revenue_rate)
       )
     )
 

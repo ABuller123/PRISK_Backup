@@ -607,7 +607,7 @@ mod_status_server <- function(id, status_reactive, events_reactive, delete_event
         if (nrow(events) == 0) {
           return(
             shiny::tags$p(
-              "No area selections to toggle yet. Choose a basin level and basins when adding a Flood hazard, or a country / ADM level and regions when adding a Heat hazard.",
+              "No area selections to toggle yet. Choose a basin level and basins when adding a Flood hazard, or a country / ADM level and regions when adding a Heat or Drought hazard.",
               class = "text-muted status-map-toggle-empty"
             )
           )

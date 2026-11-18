@@ -835,6 +835,52 @@ is shown as the single summary value; the **average annual revenue adjustment** 
 `baseline_revenue_t x (-AAL rate_t)` (negative = revenue lost). One probabilistic event per hazard type per run (Flood and Heat may be combined
 and are added).
 
+### Global Drought (Crop Yield) -- Global mode only
+
+Brazil's Drought hazard (SPI-3, `config/Drought.yml`, seasons Summer/Autumn/...) is untouched. Global mode has its
+own drought engine in `R/utils__drought_global.R`, activated by `hazards/config_global/Drought.yml` (indicator
+`type: global_drought_maps`). Agriculture assets only (`asset_category == "agriculture"`, case-insensitive);
+other assets get `damage_factor = 0`, `drought_status = "not applicable (non-agriculture asset)"` and no shock.
+
+**Hazard data** (`hazards/indicators/Drought Global/`): 48 GeoTIFFs `spei3_rl_<ssp>_<start>-<end>_<season>.tif`
+(4 SSPs x 3 windows 2021-2040 / 2031-2050 / 2041-2060 x seasons DJF/MAM/JJA/SON), bands `rl_<median|mean|p10|p90>_RP<2..100>`
+= SPEI-3 return level (lower = drier; values capped at -5 in the source). Read lazily like the heat maps; the inventory
+has one row per scenario x season x return period x statistic (`build_global_drought_inventory()`). Time blending reuses
+`heat_blend_weights()` (centre years 2030.5 / 2040.5 / 2050.5; years after 2050.5 use the 2041-2060 map).
+
+**Crop** (`resolve_drought_crop()`): `asset_subtype` normalised by `normalize_drought_crop()` -- Maize = Corn; "Maize 2" /
+second maize / safrinha -> Maize.2 calendar; "Winter wheat" -> Wheat.Winter calendar (both only when stated explicitly);
+Soy / Soya beans / Soybean(s) -> Soybeans. Anything else (Rice, Banana, blank, ...) -> the country's most produced of
+wheat/soy/maize from `hazards/mappings/Most used Crop Country List_WSM.xlsx` (ISO2 / ISO3 / name); country without a proxy
+-> Maize. `crop_source` = input / country_proxy / default.
+
+**Growing period** (`hazards/indicators/Drought Global Crop Calendar/<Crop>.crop.calendar.nc`, 0.5 deg): the `grow.season`
+flags of the asset's cell; a cell with no growing season for that crop -> nearest cell that has one (great-circle,
+`calendar_match = "nearest_cell"`, `calendar_distance_km`). Calendars are cached per file.
+
+**Damage** (`hazards/mappings/drought_damage_function_global.xlsx`: SPEI3, damage factor, crop Corn/Soybean/Wheat(/Rice
+unused), off_window): closest 0.1 SPEI step of the crop curve (ties -> drier step; below -3 -> -3; >= 0 -> 0), negative
+factors clamped to 0. `damage_factor = in-window factor` when the event season is a growing season, else
+`in-window factor x off_window` (0.15). Shock: `revenue * (1 - damage_factor)` in the event year (config equation).
+Assets without coordinates / outside the map: 0 damage + warning. Results carry `spei3`, `spei3_matched`, `crop`,
+`crop_source`, `growing_seasons`, `in_growing_period`, `damage_factor_in_window`, `off_window`, `drought_status`,
+`calendar_*`, `drought_revenue_adjustment` (= -baseline revenue x damage factor); backend-only columns are hidden in the
+Asset Analysis table (`DROUGHT_BACKEND_ONLY_COLS`). Warnings are returned as `results$drought_warnings`.
+
+**Deterministic**: events carry scenario, season, return period, statistic (default median), event year; split off in
+`compute_risk()` like heat (`is_global_drought_event()`), built by `build_global_drought_event_factors()`; optional
+ADM0/1/2 selection through the shared `apply_global_adm_spatial_selection()` (also used by heat).
+
+**Probabilistic** (`compute_global_drought_aal()`): per year, all four seasons are blended; per asset x season the loss
+curve over RP 2..100 (in-window full / off-window x 0.15) is integrated with `calculate_aal()` (zero loss at RP 1, flat
+beyond RP 100; evaluated through the equivalent linear weights `aal_weights_for_rps()`), and the annual drought AAL is the
+mean over the four seasons -- longer growing periods mean higher AAL. Yearly series applied per year
+(`compute_aal_shock_trajectories(aal_drought_yearly =)`), added to flood / heat AAL. No season is chosen in the UI.
+
+**UI**: season dropdown ordered DJF, MAM, JJA, SON (`order_drought_seasons()`, Brazil labels unaffected); Probabilistic
+hides season and return period; Global Drought uses the administrative-region panel like Global Heat
+(`global_adm_hazard_types()`).
+
 ### Global Basin Spatial Separation (Flood, deterministic)
 
 `R/utils__global_basins.R`; shapefiles in `spatial_separation/global_basins/hybas_global_named/`

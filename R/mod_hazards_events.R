@@ -76,12 +76,12 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
     counter <- shiny::reactiveVal(1L)
 
     # Hazard types with a working Probabilistic/AAL calculation engine: Flood, plus the
-    # global heat hazard (Global mode). The Mode toggle is shown for every hazard, but
+    # global heat and global drought hazards (Global mode). The Mode toggle is shown for every hazard, but
     # Probabilistic is only actually honored for these -- picking it for anything else is
     # rejected at Add time with a clear message, so the dropdown itself never needs
     # hazard-type-dependent filtering.
     probabilistic_capable_hazards_for <- function(cfg) {
-      c("Flood", global_heat_hazard_types(cfg))
+      c("Flood", global_heat_hazard_types(cfg), global_drought_hazard_types(cfg))
     }
 
     # Shared event_id assignment, used by both the deterministic and probabilistic
@@ -307,9 +307,9 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
 
       add_region_val <- if (!is.null(region_reactive)) region_reactive() else "brazil"
       add_is_global <- identical(add_region_val, "global")
-      # Global Flood uses the global basin scheme and Global Heat the administrative-region
-      # scheme; every other hazard keeps its configured scheme.
-      add_is_global_heat <- add_is_global && haz_type %in% global_heat_hazard_types(cfg)
+      # Global Flood uses the global basin scheme and Global Heat / Drought the
+      # administrative-region scheme; every other hazard keeps its configured scheme.
+      add_is_global_heat <- add_is_global && haz_type %in% global_adm_hazard_types(cfg)
       spatial_scheme_val <- if (add_is_global && identical(haz_type, "Flood")) {
         "global_basins"
       } else if (add_is_global_heat) {
@@ -489,7 +489,7 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
       )
     }
 
-    # Global administrative separation panel (Heat): level -> countries -> regions, multi-select.
+    # Global administrative separation panel (Heat, Drought): level -> countries -> regions, multi-select.
     # ADM0 stops at the countries; ADM1 / ADM2 then list the regions of the chosen countries
     # (the ADM2 list has 49k entries, so it is only built for explicit countries).
     build_global_adm_ui <- function(k) {
@@ -589,6 +589,10 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
         calc_mode_val <- input[[paste0("calc_mode_", k)]]
         if (identical(calc_mode_val, "probabilistic")) {
           index_cols <- setdiff(index_cols, "return_period")
+          # Global drought AAL integrates all four seasons, so no season is chosen.
+          if (!inherits(cfg, "try-error") && hazard_type_val %in% global_drought_hazard_types(cfg)) {
+            index_cols <- setdiff(index_cols, "season")
+          }
         }
 
         if (length(index_cols) == 0) return(shiny::helpText("No index defined for this hazard"))
@@ -611,8 +615,10 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
           if (label == "statistic") label <- "Statistic"
 
           choices <- sort(unique(temp_inv[[idx_col]]))
-          # Heat statistic: median first so it is the default selection
+          # Heat / drought statistic: median first so it is the default selection
           if (idx_col == "statistic") choices <- order_heat_statistics(choices)
+          # Seasons in calendar order (DJF, MAM, JJA, SON); other labels keep sorted order
+          if (idx_col == "season") choices <- order_drought_seasons(choices)
           
           # Check if we already have a selection for this input
           input_id <- paste0("filter_", k, "_", idx_col)
@@ -648,11 +654,11 @@ mod_hazards_events_server <- function(id, hazards_inventory, hazard_configs, bas
         region_val <- if (!is.null(region_reactive)) region_reactive() else "brazil"
         if (identical(region_val, "global")) {
           # Global mode: basin separation applies to deterministic Flood, administrative-region
-          # separation to deterministic Heat.
+          # separation to deterministic Heat and Drought.
           is_prob <- identical(input[[paste0("calc_mode_", k)]], "probabilistic")
           global_cfg <- try(hazard_configs(), silent = TRUE)
           is_heat <- !inherits(global_cfg, "try-error") && !is.null(global_cfg) &&
-            as.character(hazard_type_val) %in% global_heat_hazard_types(global_cfg)
+            as.character(hazard_type_val) %in% global_adm_hazard_types(global_cfg)
           if (is_prob || !(identical(as.character(hazard_type_val), "Flood") || is_heat)) {
             return(shiny::p(
               class = "text-muted",

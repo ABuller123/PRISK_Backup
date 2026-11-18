@@ -282,14 +282,17 @@ compute_risk <- function(assets,
 
   hazards_inventory <- drop_heat_ui_inventory_columns(hazards_inventory)
 
-  # Global heat events (labour productivity) are resolved by their own engine
-  # (see utils__heat_global.R) and never pass through raster extraction, spatial
-  # separation or the generic mapping joins. `events` keeps only the remaining
-  # (core) events for Phase 2; `events_all` is used for the shock sequence.
+  # Global heat events (labour productivity) and global drought events (crop yield)
+  # are resolved by their own engines (see utils__heat_global.R, utils__drought_global.R)
+  # and never pass through raster extraction, spatial separation or the generic mapping
+  # joins. `events` keeps only the remaining (core) events for Phase 2; `events_all` is
+  # used for the shock sequence.
   events_all <- events
   is_heat_event <- is_global_heat_event(events, hazard_configs)
+  is_drought_event <- is_global_drought_event(events, hazard_configs)
   events_heat <- events[is_heat_event, , drop = FALSE]
-  events <- events[!is_heat_event, , drop = FALSE]
+  events_drought <- events[is_drought_event, , drop = FALSE]
+  events <- events[!is_heat_event & !is_drought_event, , drop = FALSE]
   has_core_events <- nrow(events) > 0
 
   # Filter assets to only include those with matching companies
@@ -524,7 +527,7 @@ compute_risk <- function(assets,
         dplyr::select(-dplyr::all_of(suffix_cols))
     }
   } else {
-    # Only global heat events were requested: no flood/other hazard extraction is needed.
+    # Only global heat/drought events were requested: no flood/other hazard extraction is needed.
     assets_factors_included <- tibble::tibble()
     assets_factors_for_shocks <- tibble::tibble()
     assets_factors <- tibble::tibble()
@@ -552,6 +555,26 @@ compute_risk <- function(assets,
     assets_factors <- dplyr::bind_rows(assets_factors, heat_run$rows)
   }
 
+  # Step 2.7: Global drought events -- per-asset SPEI-3 (season, blended by shock year),
+  # crop (input or country proxy), growing period from the crop calendar and the
+  # resulting yield-loss damage factor (agriculture assets only).
+  drought_warnings <- character(0)
+  if (nrow(events_drought) > 0) {
+    .report_progress(0.64, "Computing global drought exposure...")
+    drought_run <- build_global_drought_event_factors(
+      assets, events_drought, hazard_configs, hazards_dir,
+      spatial_separation_data = spatial_separation_data, base_dir = base_dir
+    )
+    drought_warnings <- drought_run$warnings
+    for (msg in drought_warnings) message(msg)
+
+    assets_factors_for_shocks <- dplyr::bind_rows(
+      assets_factors_for_shocks,
+      drought_run$rows[drought_run$rows$spatial_included, , drop = FALSE]
+    )
+    assets_factors <- dplyr::bind_rows(assets_factors, drought_run$rows)
+  }
+
   # ============================================================================
   # PHASE 3: SHOCK - Compute baseline and shocked yearly trajectories
   # ============================================================================
@@ -567,6 +590,12 @@ compute_risk <- function(assets,
   # Heat rows: revenue_adjustment = baseline revenue (event year) x output_change_pct
   if (nrow(events_heat) > 0) {
     assets_factors <- add_heat_revenue_adjustment(assets_factors, yearly_baseline)
+  }
+  # Drought rows: drought_revenue_adjustment = -baseline revenue (event year) x damage factor
+  if (nrow(events_drought) > 0) {
+    assets_factors <- add_drought_revenue_adjustment(
+      assets_factors, yearly_baseline, global_drought_hazard_types(hazard_configs)
+    )
   }
 
   # Step 3.2: Compute shocked trajectories and concatenate with baseline
@@ -618,6 +647,9 @@ compute_risk <- function(assets,
 
   if (length(heat_warnings) > 0) {
     final_results$heat_warnings <- heat_warnings
+  }
+  if (length(drought_warnings) > 0) {
+    final_results$drought_warnings <- drought_warnings
   }
 
   final_results

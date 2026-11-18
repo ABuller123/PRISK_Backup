@@ -141,12 +141,18 @@ mod_profit_pathways_server <- function(id, results_reactive, cnae_exposure_react
             "sector_code"
           ))
         ) |>
+        # Probabilistic results (one row per asset x return period) need not carry
+        # asset_subtype / asset_category: add them as NA instead of failing.
+        (\(df) {
+          if (!"asset_subtype" %in% names(df)) df$asset_subtype <- NA_character_
+          if (!"asset_category" %in% names(df)) df$asset_category <- NA_character_
+          df
+        })() |>
         dplyr::mutate(
           asset_subtype = dplyr::if_else(
-            "asset_category" %in% names(dplyr::cur_data()) &
-              !is.na(.data$asset_category) &
+            !is.na(.data$asset_category) &
               tolower(as.character(.data$asset_category)) == "agriculture",
-            .data$asset_subtype,
+            as.character(.data$asset_subtype),
             NA_character_
           )
         ) |>
