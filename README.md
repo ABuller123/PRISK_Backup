@@ -377,7 +377,6 @@ The pipeline handles NetCDF files through several mechanisms:
 - `tests/testthat/` - Unit and integration tests following TDD principles
 - `tests/tests_data/` - Test data for development and testing
 - `man/` - Auto-generated documentation (do not edit manually)
-- `CONTEXT.md` - Development notes and function contracts
 
 ## Hazard Data Computation Methods
 
