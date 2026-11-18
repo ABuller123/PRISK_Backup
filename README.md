@@ -5,6 +5,8 @@
 
 R package for climate risk assessment using geospatial hazard data and financial modeling. Supports GeoTIFF (.tif), NetCDF (.nc), and CSV hazard data formats with automated ensemble statistics extraction and multi-format pipeline handling.
 
+Created with the support of AI tools.
+
 ## About this repository
 
 This repository contains the **code of the model only**. It does not include any data.
