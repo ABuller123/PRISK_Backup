@@ -169,7 +169,9 @@ normalize_hazard_config <- function(config, hazard_name, file_path = NULL) {
     indicator_source <- if (grepl("\\.nc$", indicator$file, ignore.case = TRUE)) "nc" else "tif"
 
     # Optional engine marker. `global_heat_maps` selects the Global-mode heat
-    # engine (multi-band change maps blended by shock year; see utils__heat_global.R).
+    # engine (multi-band change maps blended by shock year; see utils__heat_global.R);
+    # `global_drought_maps` the Global-mode drought engine (SPEI-3 return-level maps per
+    # season, blended by shock year; see utils__drought_global.R).
     indicator_type <- indicator$type
     if (is.null(indicator_type) || !nzchar(as.character(indicator_type))) {
       indicator_type <- NA_character_
@@ -403,6 +405,10 @@ normalize_hazard_config <- function(config, hazard_name, file_path = NULL) {
     shocks = shocks,
     path = file_path
   )
+  # Optional (global drought engine): crop-calendar folder relative to hazards/indicators
+  if (!is.null(config$crop_calendar) && nzchar(as.character(config$crop_calendar))) {
+    normalized$crop_calendar <- as.character(config$crop_calendar)
+  }
 
   return(normalized)
 }

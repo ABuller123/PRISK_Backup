@@ -407,3 +407,57 @@ testthat::test_that("mod_hazards_events_server sets season to NA for non-Drought
     testthat::expect_equal(ev$hazard_type[1], "Flood")
   })
 })
+
+testthat::test_that("mod_hazards_events_server adds global drought events (deterministic with season, probabilistic without)", {
+  testthat::skip_on_ci()
+  testthat::skip_if_not_installed("shiny")
+  fx <- make_drought_test_root()
+  inv <- suppressMessages(load_hazards_and_inventory(fx$config_dir, fx$indicators_dir, aggregate_factor = 1L))
+  shiny::testServer(mod_hazards_events_server, args = list(
+    id = "hz",
+    hazards_inventory = shiny::reactive(inv$inventory),
+    hazard_configs = shiny::reactive(inv$configs),
+    region_reactive = shiny::reactive("global")
+  ), {
+    # season choices are offered in calendar order
+    session$setInputs("hazard_type_1" = "Drought")
+    html <- htmltools::renderTags(output[["dynamic_filters_ui_1"]]$html)$html
+    pos <- vapply(c("DJF", "MAM", "JJA", "SON"), function(s) regexpr(paste0(">", s, "<"), html)[[1]], numeric(1))
+    testthat::expect_true(all(pos > 0))
+    testthat::expect_true(all(diff(pos) > 0))
+
+    session$setInputs("filter_1_scenario_name" = "ssp126")
+    session$setInputs("filter_1_season" = "JJA")
+    session$setInputs("filter_1_return_period" = 25)
+    session$setInputs("filter_1_statistic" = "p90")
+    session$setInputs("year_1" = 2040)
+    session$setInputs(add_event = 1)
+
+    ev <- events_rv()
+    testthat::expect_equal(nrow(ev), 1)
+    testthat::expect_equal(ev$hazard_type[1], "Drought")
+    testthat::expect_equal(ev$season[1], "JJA")
+    testthat::expect_equal(ev$statistic[1], "p90")
+    testthat::expect_equal(ev$return_period[1], 25)
+    testthat::expect_equal(ev$event_year[1], 2040L)
+    testthat::expect_equal(ev$calc_mode[1], "deterministic")
+    testthat::expect_equal(ev$spatial_scheme[1], "global_adm")
+    testthat::expect_true(ev$hazard_name[1] %in% inv$inventory$hazard_name)
+    testthat::expect_match(ev$hazard_name[1], "season=JJA")
+
+    # probabilistic: no season / return period filters, all seasons integrated
+    session$setInputs("calc_mode_2" = "probabilistic")
+    session$setInputs("hazard_type_2" = "Drought")
+    html2 <- htmltools::renderTags(output[["dynamic_filters_ui_2"]]$html)$html
+    testthat::expect_false(grepl("filter_2_season", html2))
+    testthat::expect_false(grepl("filter_2_return_period", html2))
+    session$setInputs("filter_2_scenario_name" = "ssp585")
+    session$setInputs("filter_2_statistic" = "median")
+    session$setInputs(add_event = 2)
+    ev <- events_rv()
+    testthat::expect_equal(nrow(ev), 2)
+    testthat::expect_equal(ev$calc_mode[2], "probabilistic")
+    testthat::expect_true(is.na(ev$season[2]))
+    testthat::expect_equal(ev$statistic[2], "median")
+  })
+})

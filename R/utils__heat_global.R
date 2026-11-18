@@ -859,6 +859,24 @@ build_global_heat_event_factors <- function(assets, events_heat, hazard_configs,
 #'   returned unchanged.
 #' @noRd
 apply_heat_spatial_selection <- function(rows, events_heat, hazard_configs, spatial_separation_data, base_dir) {
+  apply_global_adm_spatial_selection(
+    rows, events_heat, hazard_configs, spatial_separation_data, base_dir,
+    value_cols = c("excess_heat_days", "s", "output_change_pct"),
+    label = "heat"
+  )
+}
+
+#' Apply each event's administrative-region selection to its asset rows (internal)
+#'
+#' @description Shared by the Global Heat and Global Drought engines (`global_adm` scheme).
+#'   Assets outside the selected regions get `spatial_included = FALSE` /
+#'   `spatial_multiplier = 0` and their hazard `value_cols` are blanked; whole-area events are
+#'   returned unchanged.
+#' @param value_cols hazard value columns to blank for assets outside the selection
+#' @param label hazard label used in console messages
+#' @noRd
+apply_global_adm_spatial_selection <- function(rows, events_heat, hazard_configs, spatial_separation_data, base_dir,
+                                               value_cols, label = "heat") {
   if (nrow(rows) == 0) {
     return(rows)
   }
@@ -871,9 +889,9 @@ apply_heat_spatial_selection <- function(rows, events_heat, hazard_configs, spat
   not_adm <- !is.na(lvl) & nzchar(lvl) & !lvl %in% c(whole_area_spatial_levels(), names(GLOBAL_ADM_LEVELS))
   if (any(not_adm)) {
     message(
-      "[heat] Ignoring the non-administrative spatial level '", paste(unique(lvl[not_adm]), collapse = "', '"),
-      "' on Heat event(s) ", paste(events_heat$event_id[not_adm], collapse = ", "),
-      " - Heat covers the whole area unless a country / ADM1 / ADM2 selection is made."
+      "[", label, "] Ignoring the non-administrative spatial level '", paste(unique(lvl[not_adm]), collapse = "', '"),
+      "' on ", tools::toTitleCase(label), " event(s) ", paste(events_heat$event_id[not_adm], collapse = ", "),
+      " - ", tools::toTitleCase(label), " covers the whole area unless a country / ADM1 / ADM2 selection is made."
     )
     events_heat$spatial_level[not_adm] <- GLOBAL_WHOLE_AREA_LEVEL
     lvl[not_adm] <- GLOBAL_WHOLE_AREA_LEVEL
@@ -901,9 +919,9 @@ apply_heat_spatial_selection <- function(rows, events_heat, hazard_configs, spat
     )
 
   outside <- !rows$spatial_included
-  rows$excess_heat_days[outside] <- NA_real_
-  rows$s[outside] <- NA_real_
-  rows$output_change_pct[outside] <- NA_real_
+  for (col in intersect(value_cols, names(rows))) {
+    rows[[col]][outside] <- NA_real_
+  }
   rows
 }
 
@@ -1086,7 +1104,8 @@ compute_global_heat_aal <- function(assets, event, hazard_configs, hazards_dir, 
     )
 
   meta_cols <- intersect(
-    c("asset", "company", "latitude", "longitude", "country", "asset_category", "share_of_economic_activity"),
+    c("asset", "company", "latitude", "longitude", "country", "asset_category", "asset_subtype",
+      "share_of_economic_activity"),
     names(asset_pts)
   )
   factors_by_rp <- asset_pts |>

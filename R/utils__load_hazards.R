@@ -179,6 +179,22 @@ load_hazards_and_inventory <- function(
         }
         next
       }
+
+      # Global drought maps: SPEI-3 return-level maps per season, read lazily at compute
+      # time like the heat maps (inventory rows only).
+      if (identical(as.character(indicator$type), "global_drought_maps")) {
+        drought_inventory <- build_global_drought_inventory(
+          hazard_type = hazard_type,
+          indicator_key = indicator_key,
+          indicator = indicator,
+          hazard_indicators_dir = hazard_indicators_dir
+        )
+        if (!is.null(drought_inventory) && nrow(drought_inventory) > 0) {
+          message("  Registered ", nrow(drought_inventory), " global drought map combinations for ", hazard_type)
+          inventory <- dplyr::bind_rows(inventory, drought_inventory)
+        }
+        next
+      }
       
       if (indicator$source == "nc" && !is_dir) {
         nc_result <- load_nc_hazards_with_metadata(

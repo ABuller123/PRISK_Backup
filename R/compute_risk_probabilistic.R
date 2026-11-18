@@ -20,14 +20,15 @@
 #'   `gather_and_pivot_results()` (inside `compute_companies_financials()`) and
 #'   the result-display modules that pivot on that string need no changes.
 #'
-#'   Scope: at most one Probabilistic event PER HAZARD TYPE per run -- Flood and/or
-#'   global Heat (labour productivity). Mixing multiple climate scenarios of the
+#'   Scope: at most one Probabilistic event PER HAZARD TYPE per run -- Flood, global
+#'   Heat (labour productivity) and/or global Drought (crop yield). Mixing multiple climate scenarios of the
 #'   same hazard (e.g. present + rcp85) in one summed AAL would have no coherent
 #'   physical interpretation -- scenarios are alternative futures -- but distinct
 #'   hazards are concurrent risks, so a Flood AAL and a Heat AAL add (as the
 #'   deterministic path adds distinct hazard events). Flood's AAL is constant over
 #'   the horizon; Heat's AAL is recomputed for every year from the blended maps
-#'   (see `compute_global_heat_aal()`). Spatial separation is not applied in
+#'   (see `compute_global_heat_aal()`), and so is Drought's (all four seasons, see
+#'   `compute_global_drought_aal()`). Spatial separation is not applied in
 #'   probabilistic mode (whole selected area only).
 #' @param assets tibble of asset data (from `read_assets()`)
 #' @param companies tibble of company data (from `read_companies()`)
@@ -88,7 +89,8 @@ compute_risk_probabilistic <- function(
   hazards_inventory <- drop_heat_ui_inventory_columns(hazards_inventory)
 
   heat_types <- global_heat_hazard_types(hazard_configs)
-  supported_types <- c("Flood", heat_types)
+  drought_types <- global_drought_hazard_types(hazard_configs)
+  supported_types <- c("Flood", heat_types, drought_types)
   if (!all(events$hazard_type %in% supported_types)) {
     stop(
       "compute_risk_probabilistic: only hazard types ", paste(supported_types, collapse = ", "),
@@ -104,8 +106,10 @@ compute_risk_probabilistic <- function(
   }
   flood_events <- events[events$hazard_type == "Flood", , drop = FALSE]
   heat_events <- events[events$hazard_type %in% heat_types, , drop = FALSE]
+  drought_events <- events[events$hazard_type %in% drought_types, , drop = FALSE]
   has_flood <- nrow(flood_events) > 0
   has_heat <- nrow(heat_events) > 0
+  has_drought <- nrow(drought_events) > 0
   if (has_flood && (is.null(hazard_configs) || !"Flood" %in% names(hazard_configs))) {
     stop("compute_risk_probabilistic: hazard_configs must include a 'Flood' entry")
   }
@@ -174,10 +178,32 @@ compute_risk_probabilistic <- function(
     assets_factors_by_rp <- dplyr::bind_rows(assets_factors_by_rp, heat_aal$factors_by_rp)
   }
 
+  drought_aal <- NULL
+  if (has_drought) {
+    .report_progress(0.67, "Computing drought Average Annual Loss for every year...")
+    drought_aal <- compute_global_drought_aal(
+      assets = assets,
+      event = drought_events[1, , drop = FALSE],
+      hazard_configs = hazard_configs,
+      hazards_dir = hazards_dir,
+      years = unique(yearly_baseline$year)
+    )
+    for (msg in drought_aal$warnings) message(msg)
+    drought_aal <- add_drought_aal_revenue_adjustment(drought_aal, yearly_baseline)
+
+    aal$summary <- aal$summary |>
+      dplyr::left_join(drought_aal$summary, by = "asset") |>
+      dplyr::mutate(aal_drought_revenue_rate = dplyr::coalesce(.data$aal_drought_revenue_rate, 0))
+    aal$detail <- dplyr::bind_rows(aal$detail, drought_aal$detail)
+    aal$drought_yearly <- drought_aal$yearly
+    assets_factors_by_rp <- dplyr::bind_rows(assets_factors_by_rp, drought_aal$factors_by_rp)
+  }
+
   .report_progress(0.70, "Applying Average Annual Loss to every year...")
   yearly_shock <- compute_aal_shock_trajectories(
     yearly_baseline, aal$summary, companies,
-    aal_heat_yearly = if (has_heat) heat_aal$yearly else NULL
+    aal_heat_yearly = if (has_heat) heat_aal$yearly else NULL,
+    aal_drought_yearly = if (has_drought) drought_aal$yearly else NULL
   )
   yearly_scenarios <- concatenate_baseline_and_shock(yearly_baseline, yearly_shock)
 
@@ -202,6 +228,9 @@ compute_risk_probabilistic <- function(
   )
   if (has_heat && length(heat_aal$warnings) > 0) {
     out$heat_warnings <- heat_aal$warnings
+  }
+  if (has_drought && length(drought_aal$warnings) > 0) {
+    out$drought_warnings <- drought_aal$warnings
   }
   out
 }

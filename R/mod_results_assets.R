@@ -46,6 +46,7 @@ HEAT_BACKEND_ONLY_COLS <- c(
 # diagnostic too (heat rows are always "included"), but flood/other rows in a mixed table still
 # need it, so it is hidden only when every row is a heat row.
 drop_heat_backend_columns <- function(df) {
+  df <- drop_drought_backend_columns(df)
   if (is.null(df) || !"excess_heat_days" %in% names(df)) {
     return(df)
   }
@@ -60,6 +61,22 @@ drop_heat_backend_columns <- function(df) {
   }
   df |>
     dplyr::select(-dplyr::any_of(drop_cols))
+}
+
+# Global drought columns kept in the results object (backend) but not shown in the Asset
+# Analysis tables: internal keys, calendar cell coordinates and per-season flags (the
+# readable `growing_seasons` / `in_growing_period` columns are shown instead).
+DROUGHT_BACKEND_ONLY_COLS <- c(
+  "is_agriculture", "crop_key", "damage_crop", "calendar_lon", "calendar_lat",
+  "gs_DJF", "gs_MAM", "gs_JJA", "gs_SON", "drought_map_weights"
+)
+
+drop_drought_backend_columns <- function(df) {
+  if (is.null(df) || !"drought_status" %in% names(df)) {
+    return(df)
+  }
+  df |>
+    dplyr::select(-dplyr::any_of(DROUGHT_BACKEND_ONLY_COLS))
 }
 
 # Probabilistic-mode Asset Exposures table: unlike deterministic assets_factors
@@ -83,6 +100,21 @@ build_probabilistic_assets_table <- function(assets_factors_by_rp, aal_summary, 
       return(tibble::tibble())
     }
   }
+  # Global drought (crop yield) AAL has its own layout: per-season SPEI-3 and the
+  # season-averaged loss rate per return period.
+  if ("drought_loss_rate" %in% names(assets_factors_by_rp) && any(!is.na(assets_factors_by_rp$drought_loss_rate))) {
+    return(build_probabilistic_drought_table(
+      assets_factors_by_rp[!is.na(assets_factors_by_rp$drought_loss_rate), , drop = FALSE],
+      aal_summary
+    ))
+  }
+  assets_factors_by_rp <- assets_factors_by_rp |>
+    dplyr::select(-dplyr::any_of(c(
+      "drought_loss_rate", paste0("spei3_", DROUGHT_SEASONS), "crop_input", "crop_key", "crop", "crop_source",
+      "damage_crop", "calendar_crop", "calendar_match", "calendar_distance_km", "calendar_lon", "calendar_lat",
+      paste0("gs_", DROUGHT_SEASONS), "growing_seasons", "is_agriculture", "off_window"
+    )))
+
   # A flood-only table can still carry an all-NA excess_heat_days column when a heat event
   # was run alongside it (rows are bound across hazards), so test for actual heat values.
   is_heat_table <- "excess_heat_days" %in% names(assets_factors_by_rp) &&
@@ -164,7 +196,10 @@ build_probabilistic_assets_table <- function(assets_factors_by_rp, aal_summary, 
         )
     } else {
       aal_display <- aal_summary |>
-        dplyr::select(-dplyr::any_of(c("aal_lp_revenue_rate", "avg_annual_revenue_adjustment"))) |>
+        dplyr::select(-dplyr::any_of(c(
+          "aal_lp_revenue_rate", "avg_annual_revenue_adjustment",
+          "aal_drought_revenue_rate", "avg_annual_drought_revenue_adjustment"
+        ))) |>
         dplyr::mutate(
           aal_pd_profit = paste0("$", formatC(round(.data$aal_pd_profit), format = "f", digits = 0, big.mark = ","))
         ) |>
@@ -177,6 +212,60 @@ build_probabilistic_assets_table <- function(assets_factors_by_rp, aal_summary, 
     result <- result |> dplyr::left_join(aal_display, by = "asset")
   }
 
+  result
+}
+
+#' Probabilistic-mode Asset Exposures table for global Drought (internal)
+#'
+#' @description One row per agriculture asset: crop, growing seasons and calendar match,
+#'   then per return period the SPEI-3 of each season (mean over the horizon) and the
+#'   season-averaged yield-loss rate, then the drought AAL and revenue adjustment.
+#' @noRd
+build_probabilistic_drought_table <- function(drought_by_rp, aal_summary) {
+  base_cols <- intersect(
+    c("asset", "company", "asset_category", "share_of_economic_activity", "country",
+      "crop_input", "crop", "crop_source", "calendar_crop", "growing_seasons", "calendar_match",
+      "calendar_distance_km", "off_window", "statistic"),
+    names(drought_by_rp)
+  )
+  result <- drought_by_rp |>
+    dplyr::select(dplyr::all_of(base_cols)) |>
+    dplyr::distinct(.data$asset, .keep_all = TRUE)
+  if ("calendar_distance_km" %in% names(result)) {
+    result$calendar_distance_km <- round(result$calendar_distance_km, 0)
+  }
+  result <- label_assumed_drought_crop(result)
+
+  metric_cols <- intersect(c(paste0("spei3_", DROUGHT_SEASONS), "drought_loss_rate"), names(drought_by_rp))
+  labels <- c(
+    stats::setNames(paste0("SPEI-3 ", DROUGHT_SEASONS), paste0("spei3_", DROUGHT_SEASONS)),
+    drought_loss_rate = "Yield Loss Rate (mean over seasons)"
+  )
+  for (col in metric_cols) {
+    wide_piece <- drought_by_rp |>
+      dplyr::select("asset", "return_period", value = dplyr::all_of(col)) |>
+      dplyr::mutate(
+        value = round(.data$value, if (identical(col, "drought_loss_rate")) 6 else 2),
+        rp_col = paste0(labels[[col]], " (RP=", .data$return_period, ")")
+      ) |>
+      dplyr::select(-"return_period") |>
+      tidyr::pivot_wider(names_from = "rp_col", values_from = "value")
+    result <- result |> dplyr::left_join(wide_piece, by = "asset")
+  }
+
+  if (!is.null(aal_summary) && is.data.frame(aal_summary) && "aal_drought_revenue_rate" %in% names(aal_summary)) {
+    aal_display <- aal_summary |>
+      dplyr::select(
+        "asset",
+        "AAL Drought Yield Loss - Revenue Rate (mean over years)" = "aal_drought_revenue_rate",
+        dplyr::any_of(c("Average Annual Revenue Adjustment ($)" = "avg_annual_drought_revenue_adjustment"))
+      ) |>
+      dplyr::mutate(
+        dplyr::across(dplyr::any_of("AAL Drought Yield Loss - Revenue Rate (mean over years)"), ~ round(.x, 6)),
+        dplyr::across(dplyr::any_of("Average Annual Revenue Adjustment ($)"), ~ round(.x, 0))
+      )
+    result <- result |> dplyr::left_join(aal_display, by = "asset")
+  }
   result
 }
 
@@ -426,6 +515,16 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
             dplyr::across(dplyr::any_of("output_change_pct"), ~ round(.x, 6))
           )
       }
+      # Global drought rows: readable SPEI-3 / distance values
+      if ("drought_status" %in% names(assets_df)) {
+        assets_df <- assets_df |>
+          dplyr::mutate(
+            dplyr::across(dplyr::any_of(c("spei3", "spei3_matched")), ~ round(.x, 2)),
+            dplyr::across(dplyr::any_of("calendar_distance_km"), ~ round(.x, 0)),
+            dplyr::across(dplyr::any_of(c("damage_factor", "damage_factor_in_window")), ~ round(.x, 6))
+          ) |>
+          label_assumed_drought_crop()
+      }
       heat_sector <- if ("nace_description" %in% names(assets_df)) assets_df$nace_description else NULL
 
       original_has_sector <- "sector" %in% names(assets_df)
@@ -517,6 +616,20 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
         "event_year",
         "damage_factor",
         "statistic",
+        "season",
+        "crop",
+        "crop_source",
+        "growing_seasons",
+        "in_growing_period",
+        "spei3",
+        "spei3_matched",
+        "damage_factor_in_window",
+        "off_window",
+        "drought_status",
+        "calendar_crop",
+        "calendar_match",
+        "calendar_distance_km",
+        "drought_revenue_adjustment",
         "excess_heat_days",
         "lp_exposure",
         "lp_loss",
