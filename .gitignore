@@ -5,3 +5,4 @@
 .claude/
 *.bak
 CONTEXT.md
+.DS_Store
