@@ -1,12 +1,17 @@
 Package: climate.risk.tool
-Title: An Amazing Shiny App
+Title: Physical Climate Risk Assessment for Financial Portfolios
 Version: 0.0.0.9000
 Authors@R: 
-    person(given = "firstname",
-           family = "lastname",
-           role = c("aut", "cre"),
-           email = "your@email.com")
-Description: What the package does (one paragraph).
+    person("Theia Finance Labs",
+           role = c("aut", "cre", "cph"),
+           email = "antonio@theiafinance.org")
+Description: Assesses physical climate risk for financial portfolios.
+    Asset locations are overlaid with geospatial hazard data (GeoTIFF,
+    NetCDF and CSV), hazard intensities are translated into damages and
+    revenue and profit impacts, and these are aggregated to company level
+    to derive net present value, probability of default (Merton model)
+    and expected loss under climate scenarios. Includes an interactive
+    Shiny application.
 License: MIT + file LICENSE
 Imports:
     config,
