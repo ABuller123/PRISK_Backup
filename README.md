@@ -5,6 +5,30 @@
 
 R package for climate risk assessment using geospatial hazard data and financial modeling. Supports GeoTIFF (.tif), NetCDF (.nc), and CSV hazard data formats with automated ensemble statistics extraction and multi-format pipeline handling.
 
+## About this repository
+
+This repository contains the **code of the model only**. It does not include any data.
+
+To run the model, you need hazard data, administrative boundaries and mapping tables. These are not distributed here and have to be placed in a **separate data folder** that you point the model to with `base_dir`:
+
+``` r
+run_app(base_dir = "/path/to/your/data")
+```
+
+The data folder is expected to look like this:
+
+```
+<base_dir>/
+├── areas/                  # administrative boundaries (state / municipality)
+├── spatial_separation/     # region shapefiles used to group assets
+└── hazards/
+    ├── config/             # one <HazardName>.yml per hazard
+    ├── indicators/         # hazard maps (.tif with metadata.csv, .nc, .csv)
+    └── mappings/           # damage, cost and exposure factor tables
+```
+
+Hazard and geographic data come from third-party providers and are subject to their own licences and attribution requirements. Users are responsible for obtaining the data and complying with those terms.
+
 ## Installation
 
 This project uses **`renv`** to lock R package dependencies (see `renv.lock`).
@@ -165,8 +189,8 @@ devtools::load_all()
 
 Run the development app with hot reloading:
 ``` r
-# Set environment variable for test data (optional)
-Sys.setenv(CLIMATE_RISK_BASE_DIR = "tests/tests_data")
+# Point the app to your data folder (see "About this repository")
+Sys.setenv(CLIMATE_RISK_BASE_DIR = "/path/to/your/data")
 
 # Run development version
 golem::run_dev()
@@ -200,11 +224,7 @@ devtools::check()      # Full R CMD CHECK
 
 ### 5. Hazard Data Setup
 
-For setting up hazard data and running the Brazil extraction pipeline, see:
-
-**[HAZARD_DATA_SETUP.md](HAZARD_DATA_SETUP.md)** - Complete guide for developers
-
-Quick reference:
+Hazard data is not included in this repository (see "About this repository"). Quick reference for preparing your data folder:
 - Add hazard configs to `hazards/config/<HazardName>.yml`
 - Place mapping tables in `hazards/mappings/`
 - Place hazard indicators in appropriate format:
@@ -212,7 +232,7 @@ Quick reference:
   - NetCDF files: `hazards/indicators/*.nc` (auto-discovered)
   - CSV files: `hazards/indicators/*.csv` (auto-discovered)
 - Run `Rscript data-raw/process_flood_maps_brazil.R` to generate Brazil subsets (if applicable)
-- Processed files are saved to `tests/tests_data/hazards/`
+- Processed files are saved to `hazards/` in your data folder
 
 ### 5bis. Building NetCDF hazard indicators from `workspace/hazards/indicators/` (Python)
 
@@ -375,7 +395,6 @@ The pipeline handles NetCDF files through several mechanisms:
 #### Other Key Directories
 
 - `tests/testthat/` - Unit and integration tests following TDD principles
-- `tests/tests_data/` - Test data for development and testing
 - `man/` - Auto-generated documentation (do not edit manually)
 
 ## Hazard Data Computation Methods
